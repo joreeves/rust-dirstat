@@ -1,6 +1,6 @@
-# dirstat
+# rust-dirstat
 
-A WinDirStat-style disk usage analyzer for Windows, written in Rust. It scans drives or folders and shows where the space goes in three views:
+A WinDirStat-style disk usage analyzer for Windows, written in Rust. Its command is `dirstat`. It scans drives or folders and shows where the space goes in three views:
 - a directory tree;
 - a breakdown by file type;
 - a cushion-shaded treemap, where every file is a tile sized by its bytes and colored by its type.
@@ -24,9 +24,24 @@ A WinDirStat-style disk usage analyzer for Windows, written in Rust. It scans dr
 
 ## Download
 
-Get the latest `dirstat-vX.Y.Z-windows-x64.zip` from the [Releases](https://github.com/joreeves/rust-dirstat/releases) page. Unzip it and run `dirstat.exe`; nothing needs installing. Each zip comes with a `.sha256` checksum file.
+From the [Releases](https://github.com/joreeves/rust-dirstat/releases) page, download either of these:
+- **Installer (recommended):** `rust-dirstat-vX.Y.Z-windows-x64-setup.exe`.
+  - Installs for your user account only, with no admin prompt. Admins can choose to install for all users.
+  - Adds a Start menu entry and can add `dirstat` to your PATH for terminal use.
+  - Installing a newer version upgrades in place.
+  - Uninstall from **Settings > Apps**.
+  - Silent install: `setup.exe /VERYSILENT /TASKS="addtopath"`.
+- **Portable zip:** `rust-dirstat-vX.Y.Z-windows-x64.zip`. Unzip it and run `dirstat.exe`.
 
-The executable isn't code-signed, so Windows SmartScreen may warn the first time you run it.
+`SHA256SUMS.txt` has checksums for both. The files aren't code-signed, so Windows SmartScreen may warn the first time you run them.
+
+### Updates
+
+When the window opens, rust-dirstat checks for a newer release in the background. If it finds one, the status bar shows **⬆ Update available: vX.Y.Z**; click it to open the release page, then run the new installer.
+- **What it sends:** one request to `api.github.com`, carrying only the app's name and version. It doesn't download or install anything by itself.
+- **When offline:** the check fails silently.
+- **From a terminal:** `dirstat check-update`.
+- **To turn it off:** set the environment variable `DIRSTAT_NO_UPDATE_CHECK=1`.
 
 ## Usage
 
@@ -46,6 +61,7 @@ dirstat scan D:\Projects                 # text report
 dirstat scan C:\ D:\ --top 10            # one report covering both drives
 dirstat scan C:\ --depth 2 --files 20 --extensions 10 --stats
 dirstat scan D:\ --csv d.csv --json d.json --json-depth 3
+dirstat check-update                     # is there a newer release?
 dirstat --version
 ```
 
@@ -111,7 +127,11 @@ cargo test --lib readme_screenshots -- --ignored   # writes docs/screenshots/*.p
 
 - **Version numbers** follow [Semantic Versioning](https://semver.org/). The version in `Cargo.toml` is the single source: `dirstat --version` and the window title both show it.
 - **Changelog:** every release has a section in [CHANGELOG.md](CHANGELOG.md).
-- **Release builds:** the [Build and release](.github/workflows/release.yml) workflow runs clippy, the tests and a release build on every pull request. It attaches the zip to the run as an artifact.
+- **Release builds:** the [Build and release](.github/workflows/release.yml) workflow runs on every pull request:
+  - runs clippy, the tests and a release build;
+  - builds the zip and the installer (from [installer/rust-dirstat.iss](installer/rust-dirstat.iss), using a pinned Inno Setup 6);
+  - on the runner, installs, upgrades and uninstalls the installer and checks each step;
+  - attaches everything to the run as an artifact.
 
 To publish a release:
 
@@ -128,7 +148,11 @@ To publish a release:
 When it sees the tag, the workflow:
 - checks that the tag matches `Cargo.toml` and that the changelog has the section;
 - builds and tests;
-- publishes a GitHub release with the zip, its checksum and that version's changelog notes.
+- publishes a GitHub release with the installer, the zip, `SHA256SUMS.txt` and that version's changelog notes.
+
+Installed copies then see the new release through the update check.
+
+To build the installer locally, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run `ISCC.exe /DAppVersion=X.Y.Z installer\rust-dirstat.iss` after `cargo build --release`. The setup file is written to `dist\`.
 
 ## Code map
 
@@ -140,3 +164,5 @@ When it sees the tag, the workflow:
 | `src/treemap/` | Squarified layout and van Wijk cushion shading into an RGBA buffer |
 | `src/gui/` | eframe app; the treemap is rendered on a background thread and uploaded as a texture |
 | `src/export.rs`, `src/cli.rs` | CSV/JSON writers and the text report |
+| `src/update.rs` | Update check against the latest GitHub release |
+| `installer/rust-dirstat.iss` | Inno Setup script for the installer |

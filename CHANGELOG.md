@@ -23,6 +23,12 @@ First release.
 - Right-click actions: Open, Reveal in Explorer, Copy path, Rescan folder, Move to Recycle Bin.
 - Export to CSV or JSON.
 - Command-line mode (`dirstat scan`) that prints a report and can export CSV or JSON.
+- Installer (`rust-dirstat-vX.Y.Z-windows-x64-setup.exe`): per-user install without admin
+  rights, Start menu shortcut, optional PATH entry, in-place upgrades and an uninstaller. A
+  portable zip is also published.
+- Update check: the window checks GitHub for a newer release at startup and links to it from
+  the status bar. `dirstat check-update` does the same from a terminal. Set
+  `DIRSTAT_NO_UPDATE_CHECK=1` to turn it off.
 
 [Unreleased]: https://github.com/joreeves/rust-dirstat/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/joreeves/rust-dirstat/releases/tag/v0.1.0
