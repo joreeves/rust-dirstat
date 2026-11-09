@@ -31,10 +31,19 @@ pub fn run(initial: Vec<PathBuf>, method: Method) -> anyhow::Result<()> {
             .with_icon(window_icon())
             .with_inner_size([1280.0, 840.0])
             .with_min_inner_size([720.0, 480.0]),
-        // Queue at most one frame for display (eframe's default is two), so hover highlights and
-        // scrolling keep up with the mouse pointer. The app has little GPU work, which is what
-        // egui's low-latency setting is meant for.
-        wgpu_options: eframe::WgpuConfiguration { surface: eframe::SurfaceConfig::LOW_LATENCY, ..Default::default() },
+        // Show each frame as soon as it is drawn, so hover highlights and scrolling keep up with
+        // the mouse pointer. With vsync, every frame waits for the display's next refresh (and
+        // eframe's default lets two wait in line): up to 31 ms per frame over Remote Desktop,
+        // whose display runs at about 32 Hz. The app only draws when something changes, so this
+        // doesn't keep the GPU busy, and in a normal window Windows' compositor still shows
+        // whole frames. wgpu falls back to vsync where it has to.
+        wgpu_options: eframe::WgpuConfiguration {
+            surface: eframe::SurfaceConfig {
+                present_mode: eframe::wgpu::PresentMode::AutoNoVsync,
+                desired_maximum_frame_latency: Some(1),
+            },
+            ..Default::default()
+        },
         ..Default::default()
     };
     eframe::run_native(
@@ -793,7 +802,8 @@ impl eframe::App for App {
 
         if let Some(job) = &self.scan {
             egui::CentralPanel::default().show(ui, |ui| scanning_ui(ui, job, &mut actions));
-            ctx.request_repaint_after(Duration::from_millis(100));
+            // About 60 fps for the spinner and counters (frames aren't paced by vsync).
+            ctx.request_repaint_after(Duration::from_millis(16));
         } else if let Some(loaded) = &mut self.loaded {
             let tree = loaded.tree.clone();
             let height = ui.available_height();
@@ -826,11 +836,31 @@ impl eframe::App for App {
     }
 }
 
+/// egui's spinner, except that it leaves repainting to the caller. egui's asks for the next
+/// frame right away, which without vsync means redrawing as fast as the GPU allows.
+fn spinner(ui: &mut egui::Ui) {
+    let size = ui.style().spacing.interact_size.y;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    response.widget_info(|| egui::WidgetInfo::new(egui::Role::ProgressIndicator));
+    let radius = size * 0.5 - 2.0;
+    let n = (radius.round() as usize).clamp(8, 128);
+    let time = ui.input(|i| i.time);
+    let start = time * std::f64::consts::TAU;
+    let end = start + 240f64.to_radians() * time.sin();
+    let points = (0..n)
+        .map(|i| {
+            let (sin, cos) = (start + (end - start) * i as f64 / n as f64).sin_cos();
+            rect.center() + radius * egui::vec2(cos as f32, sin as f32)
+        })
+        .collect();
+    ui.painter().add(egui::Shape::line(points, egui::Stroke::new(3.0, ui.visuals().strong_text_color())));
+}
+
 fn scanning_ui(ui: &mut egui::Ui, job: &ScanJob, actions: &mut Vec<Action>) {
     let p = &job.progress;
     ui.vertical_centered(|ui| {
         ui.add_space(48.0);
-        ui.spinner();
+        spinner(ui);
         ui.add_space(8.0);
         ui.heading(format!("Scanning {}", paths_label(&job.paths)));
         ui.add_space(12.0);

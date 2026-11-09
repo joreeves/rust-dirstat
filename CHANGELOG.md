@@ -15,7 +15,8 @@ All notable changes to rust-dirstat are listed here. The format follows
 ### Fixed
 
 - The hover highlight no longer trails the mouse pointer. The window now shows each frame as
-  soon as it is drawn, instead of queuing up to two.
+  soon as it is drawn, instead of waiting for the display's next refresh. This matters most
+  over Remote Desktop, where the display refreshes only about 30 times a second.
 - Mouse-wheel scrolling moves the lists a full step at once, instead of easing in over several
   frames while the highlight lags behind.
 
