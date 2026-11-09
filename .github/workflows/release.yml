@@ -1,6 +1,7 @@
-# Builds, tests and packages the Windows binary.
-#   - Pull requests and manual runs: the zip is attached to the run as an artifact.
-#   - Tags named vX.Y.Z: the zip is also published as a GitHub release, with the notes taken
+# Builds, tests and packages the Windows binary and installer.
+#   - Pull requests and manual runs: the zip, setup.exe and checksums are attached to the run
+#     as an artifact.
+#   - Tags named vX.Y.Z: they are also published as a GitHub release, with the notes taken
 #     from that version's section in CHANGELOG.md.
 name: Build and release
 
@@ -16,6 +17,11 @@ permissions:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Inno Setup builds the installer. Pinned, and checked against this SHA-256.
+  INNO_VERSION: 6.7.4
+  INNO_SHA256: a549929319f9120716677c685535ca4671e4b937b5fdc87e2585f32d8eb30e8c
 
 jobs:
   windows:
@@ -57,6 +63,7 @@ jobs:
           } else {
             $label = "v$version-dev.$($env:GITHUB_SHA.Substring(0, 7))"
           }
+          "version=$version" >> $env:GITHUB_OUTPUT
           "label=$label" >> $env:GITHUB_OUTPUT
 
       - name: Clippy
@@ -68,23 +75,73 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
+      - name: Install Inno Setup
+        run: |
+          $setup = "$env:RUNNER_TEMP\innosetup-$env:INNO_VERSION.exe"
+          $tag = "is-" + $env:INNO_VERSION.Replace('.', '_')
+          Invoke-WebRequest "https://github.com/jrsoftware/issrc/releases/download/$tag/innosetup-$env:INNO_VERSION.exe" -OutFile $setup
+          $hash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:INNO_SHA256) { throw "Inno Setup download has SHA-256 $hash, expected $env:INNO_SHA256" }
+          # Portable mode: unpacks the compiler without installing it.
+          $dir = "$env:RUNNER_TEMP\inno"
+          $p = Start-Process $setup -ArgumentList '/PORTABLE=1', '/CURRENTUSER', '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOICONS', '/TASKS=""', "/DIR=`"$dir`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0 -or -not (Test-Path "$dir\ISCC.exe")) { throw "Inno Setup did not unpack (exit $($p.ExitCode))" }
+          "ISCC=$dir\ISCC.exe" >> $env:GITHUB_ENV
+
       - name: Package
         id: package
         run: |
-          $name = "dirstat-${{ steps.version.outputs.label }}-windows-x64"
+          $name = "rust-dirstat-${{ steps.version.outputs.label }}-windows-x64"
+          # Portable zip.
           New-Item -ItemType Directory -Force dist/$name | Out-Null
           Copy-Item target/release/dirstat.exe, README.md, CHANGELOG.md dist/$name
           Compress-Archive -Path dist/$name/* -DestinationPath dist/$name.zip
-          $hash = (Get-FileHash dist/$name.zip -Algorithm SHA256).Hash.ToLower()
-          "$hash  $name.zip" | Set-Content dist/$name.zip.sha256 -Encoding ascii
+          Remove-Item -Recurse dist/$name
+          # Installer.
+          & $env:ISCC /Q "/DAppVersion=${{ steps.version.outputs.version }}" "/DOutputName=$name-setup" installer/rust-dirstat.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          # Checksums.
+          Get-ChildItem dist -File | Sort-Object Name | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content dist/SHA256SUMS.txt -Encoding ascii
+          Get-Content dist/SHA256SUMS.txt
           "name=$name" >> $env:GITHUB_OUTPUT
+
+      - name: Test the installer
+        run: |
+          $setup = "dist/${{ steps.package.outputs.name }}-setup.exe"
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\rust-dirstat'
+          $exe = Join-Path $dir 'dirstat.exe'
+          $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'rust-dirstat.lnk'
+          function Install {
+            $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', '/TASKS=addtopath' -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "setup exited with $($p.ExitCode)" }
+          }
+          function PathEntries { @([Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_.TrimEnd('\') -ieq $dir }).Count }
+
+          Install
+          $out = & $exe --version
+          if ($out -ne "dirstat ${{ steps.version.outputs.version }}") { throw "unexpected --version output: $out" }
+          if (-not (Test-Path $shortcut)) { throw "no Start menu shortcut at $shortcut" }
+          if ((PathEntries) -ne 1) { throw "install folder is not on the user PATH once" }
+
+          Install  # upgrade in place
+          if ((PathEntries) -ne 1) { throw "reinstall changed the PATH entry count to $(PathEntries)" }
+
+          # The uninstaller hands off to a copy of itself and returns early, so wait for it.
+          Start-Process (Join-Path $dir 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Test-Path $exe) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 1 }
+          Start-Sleep -Seconds 2
+          if (Test-Path $exe) { throw "uninstall left $exe behind" }
+          if (Test-Path $shortcut) { throw "uninstall left the Start menu shortcut" }
+          if ((PathEntries) -ne 0) { throw "uninstall left the PATH entry" }
+          "Install, upgrade and uninstall all worked."
 
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.package.outputs.name }}
-          path: |
-            dist/${{ steps.package.outputs.name }}.zip
-            dist/${{ steps.package.outputs.name }}.zip.sha256
+          path: dist/*
           retention-days: 14
 
       - name: Publish the release
@@ -92,6 +149,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $name = "${{ steps.package.outputs.name }}"
-          gh release create $env:GITHUB_REF_NAME dist/$name.zip dist/$name.zip.sha256 `
-            --verify-tag --title "dirstat $env:GITHUB_REF_NAME" --notes-file release-notes.md
+          $title = "rust-dirstat $env:GITHUB_REF_NAME"
+          gh release create $env:GITHUB_REF_NAME (Get-ChildItem dist -File).FullName `
+            --verify-tag --title $title --notes-file release-notes.md

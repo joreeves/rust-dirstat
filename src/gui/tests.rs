@@ -163,6 +163,7 @@ fn welcome_screen_offers_drives_and_folder_picker() {
         .build_eframe(|cc| App::new(cc, Vec::new(), Method::Walk));
     h.run_steps(3);
     assert!(h.state().loaded.is_none() && h.state().scan.is_none());
+    h.get_by_label(crate::APP_NAME);
     h.get_by_label_contains("Select one or more drives");
     assert_eq!(h.query_all_by_label("📂 Open folder…").count(), 2, "toolbar + welcome button");
     for d in &h.state().drives {
@@ -183,6 +184,29 @@ fn welcome_screen_offers_drives_and_folder_picker() {
         wait(&mut h, "cancelled scan", |app| app.scan.is_none());
         assert!(h.state().message.as_ref().is_some_and(|m| m.text == "Scan cancelled"));
     }
+}
+
+#[test]
+fn update_notice_appears_when_a_newer_release_is_found() {
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_eframe(|cc| App::new(cc, Vec::new(), Method::Walk));
+    h.run_steps(2);
+    assert!(h.query_by_label_contains("Update available").is_none());
+    // Stand in for the background check (tests never call GitHub).
+    let (tx, rx) = mpsc::channel();
+    h.state_mut().update_rx = Some(rx);
+    h.run_steps(2);
+    assert!(h.query_by_label_contains("Update available").is_none(), "nothing until the check answers");
+    let url = "https://github.com/joreeves/rust-dirstat/releases/tag/v9.0.0";
+    tx.send(update::Release { version: update::Version(9, 0, 0), tag: "v9.0.0".into(), url: url.into() }).unwrap();
+    h.run_steps(2);
+    h.get_by_label("⬆ Update available: v9.0.0");
+    assert!(h.state().update_rx.is_none());
+    assert_eq!(h.state().update.as_ref().map(|r| r.url.as_str()), Some(url));
 }
 
 /// Two temp folders stand in for drives so the test does not depend on the machine.
@@ -233,15 +257,18 @@ fn multiple_drives_can_be_ticked_and_scanned_together() {
     let root = t.node(t.root());
     assert_eq!(root.size, 2_500_000);
     assert_eq!(root.children.len(), 2);
-    // Ticked drives are scanned in drive order.
+    // Ticked drives are scanned in drive order. The tree shows each location by its full path
+    // (temp folders can be 8.3 short names, e.g. RUNNER~1 on CI).
     let mut expected = vec![a.root.clone(), b.root.clone()];
     expected.sort();
-    assert_eq!(&*root.name, format!("{} + {}", expected[0].display(), expected[1].display()));
+    let shown: Vec<PathBuf> = expected.iter().map(|p| scan::normalize_root(p)).collect();
+    assert_eq!(&*root.name, format!("{} + {}", shown[0].display(), shown[1].display()));
     assert_eq!(app.loaded.as_ref().unwrap().targets, expected);
     // Each drive shows as its own top-level row, and paths below it stay absolute.
-    h.get_by_label(&format!("📁 {}", b.root.display()));
+    let b_shown = scan::normalize_root(&b.root);
+    h.get_by_label(&format!("📁 {}", b_shown.display()));
     let extra = node_named(app, "extra.iso");
-    assert_eq!(t.path_of(extra).unwrap(), b.root.join("extra.iso"));
+    assert_eq!(t.path_of(extra).unwrap(), b_shown.join("extra.iso"));
 
     // Rescan repeats the same multi-drive scan.
     h.get_by_label("⟳ Rescan").click();
