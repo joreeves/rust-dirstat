@@ -1,13 +1,16 @@
-# Builds, tests and packages the Windows binary and installer.
-#   - Pull requests and manual runs: the zip, setup.exe and checksums are attached to the run
-#     as an artifact.
-#   - Tags named vX.Y.Z: they are also published as a GitHub release, with the notes taken
-#     from that version's section in CHANGELOG.md.
+# Builds, tests and packages the Windows binary and installer, and publishes releases.
+#   - Pull requests, pushes to main and manual runs: the zip, setup.exe and checksums are
+#     attached to the run as an artifact.
+#   - Releases: when main has a version (in Cargo.toml) that has no vX.Y.Z tag yet, which is
+#     what merging a "Release vX.Y.Z" PR from scripts/prepare-release.ps1 does, the run also
+#     tags that commit and publishes the GitHub release. The notes come from that version's
+#     CHANGELOG.md section. Pushing a vX.Y.Z tag by hand does the same.
 name: Build and release
 
 on:
   pull_request:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -42,10 +45,19 @@ jobs:
         id: version
         run: |
           $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          $release = $false
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
             if ($env:GITHUB_REF_NAME -ne "v$version") {
               throw "Tag $env:GITHUB_REF_NAME does not match the version in Cargo.toml ($version)"
             }
+            $release = $true
+          } elseif ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF -eq 'refs/heads/main') {
+            # A version on main without a tag yet is a new release.
+            $tag = git ls-remote --tags origin "refs/tags/v$version"
+            if ($LASTEXITCODE -ne 0) { throw "Could not list the tags on origin" }
+            $release = -not $tag
+          }
+          if ($release) {
             # Release notes: this version's section of CHANGELOG.md.
             $notes = @(); $found = $false
             foreach ($line in Get-Content CHANGELOG.md) {
@@ -63,8 +75,10 @@ jobs:
           } else {
             $label = "v$version-dev.$($env:GITHUB_SHA.Substring(0, 7))"
           }
+          "Version $version, label $label, release: $release"
           "version=$version" >> $env:GITHUB_OUTPUT
           "label=$label" >> $env:GITHUB_OUTPUT
+          "release=$($release.ToString().ToLower())" >> $env:GITHUB_OUTPUT
 
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
@@ -167,10 +181,14 @@ jobs:
           retention-days: 14
 
       - name: Publish the release
-        if: github.ref_type == 'tag'
+        if: steps.version.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $title = "rust-dirstat $env:GITHUB_REF_NAME"
-          gh release create $env:GITHUB_REF_NAME (Get-ChildItem dist -File).FullName `
-            --verify-tag --title $title --notes-file release-notes.md
+          $tag = "v${{ steps.version.outputs.version }}"
+          # On main the tag doesn't exist yet: create it on the commit this run built.
+          $where = if ($env:GITHUB_REF_TYPE -eq 'tag') { @('--verify-tag') } else { @('--target', $env:GITHUB_SHA) }
+          gh release create $tag (Get-ChildItem dist -File).FullName @where `
+            --title "rust-dirstat $tag" --notes-file release-notes.md
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+          "Published https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$tag"

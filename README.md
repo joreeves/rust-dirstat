@@ -126,31 +126,29 @@ cargo test --lib readme_screenshots -- --ignored   # writes docs/screenshots/*.p
 ## Versions and releases
 
 - **Version numbers** follow [Semantic Versioning](https://semver.org/). The version in `Cargo.toml` is the single source: `rust-dirstat --version` and the window title both show it.
-- **Changelog:** every release has a section in [CHANGELOG.md](CHANGELOG.md).
-- **Release builds:** the [Build and release](.github/workflows/release.yml) workflow runs on every pull request:
+- **Changelog:** each pull request adds its user-visible changes under **Unreleased** in [CHANGELOG.md](CHANGELOG.md). A release turns those notes into its own section.
+- **Release builds:** the [Build and release](.github/workflows/release.yml) workflow runs on every pull request and every push to `main`:
   - runs clippy, the tests and a release build;
   - builds the zip and the installer (from [installer/rust-dirstat.iss](installer/rust-dirstat.iss), using a pinned Inno Setup 6);
-  - on the runner, installs, upgrades and uninstalls the installer and checks each step;
+  - on the runner, installs the latest published release, upgrades it to this build, reinstalls and uninstalls, checking each step;
   - attaches everything to the run as an artifact.
 
 To publish a release:
 
-1. Set the new version in `Cargo.toml`. Run `cargo build` so `Cargo.lock` picks it up.
-2. In `CHANGELOG.md`, move the entries from **Unreleased** into a new `## [X.Y.Z] - YYYY-MM-DD` section, and add its link at the bottom.
-3. Merge to `main`, then tag that commit and push the tag:
+1. Run the release script from a clean checkout, with `patch`, `minor`, `major` or an exact version:
 
    ```powershell
-   git switch main; git pull
-   git tag -a vX.Y.Z -m "rust-dirstat X.Y.Z"
-   git push origin vX.Y.Z
+   ./scripts/prepare-release.ps1 minor
    ```
 
-When it sees the tag, the workflow:
-- checks that the tag matches `Cargo.toml` and that the changelog has the section;
-- builds and tests;
-- publishes a GitHub release with the installer, the zip, `SHA256SUMS.txt` and that version's changelog notes.
+   It updates `main` and bumps the version in `Cargo.toml` and `Cargo.lock`. It also moves the **Unreleased** notes under a dated heading for the new version, then opens a **Release vX.Y.Z** pull request.
+2. Merge that pull request.
 
-Installed copies then see the new release through the update check.
+That's all. The run on `main` sees a version with no tag yet. If every check passes, it then:
+- tags the merge commit `vX.Y.Z`;
+- publishes the GitHub release with the installer, the zip, `SHA256SUMS.txt` and that version's changelog notes.
+
+Installed copies then see the new release through the update check. (Pushing a `vX.Y.Z` tag by hand also still publishes a release.)
 
 To build the installer locally, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run `ISCC.exe /DAppVersion=X.Y.Z installer\rust-dirstat.iss` after `cargo build --release`. The setup file is written to `dist\`.
 
