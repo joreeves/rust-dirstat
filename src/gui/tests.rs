@@ -219,6 +219,142 @@ fn window_icon_is_the_256px_app_icon() {
     assert_eq!(icon.rgba[(128 * 256 + 128) * 4 + 3], 255, "centre is opaque");
 }
 
+fn wheel_event(unit: egui::MouseWheelUnit, y: f32, modifiers: Modifiers) -> Event {
+    Event::MouseWheel {
+        unit,
+        delta: egui::vec2(0.0, y),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+        modifiers,
+    }
+}
+
+#[test]
+fn wheel_notches_are_passed_on_as_steps_egui_applies_at_once() {
+    let moved = Event::PointerMoved(egui::pos2(5.0, 5.0));
+    let touchpad = wheel_event(egui::MouseWheelUnit::Point, 30.0, Modifiers::NONE);
+    let mut events = vec![moved.clone(), wheel_event(egui::MouseWheelUnit::Line, -3.0, Modifiers::SHIFT), touchpad.clone()];
+    scroll_wheel_immediately(&mut events, 40.0);
+
+    assert_eq!(events.first(), Some(&moved));
+    assert_eq!(events.last(), Some(&touchpad), "point deltas are left as they are");
+    let steps = &events[1..events.len() - 1];
+    assert!(steps.len() > 1);
+    let mut total = egui::Vec2::ZERO;
+    for step in steps {
+        let Event::MouseWheel { unit, delta, phase, source, modifiers } = step else { panic!("{step:?}") };
+        assert_eq!(*unit, egui::MouseWheelUnit::Point);
+        assert_eq!((*phase, *source, *modifiers), (egui::TouchPhase::Move, egui::MouseWheelSource::Wheel, Modifiers::SHIFT));
+        assert!(delta.length() < 8.0, "{delta:?} is under egui's smoothing threshold");
+        total += *delta;
+    }
+    assert!((total - egui::vec2(0.0, -120.0)).length() < 1e-3, "3 lines at 40 points each, got {total:?}");
+}
+
+#[test]
+fn a_wheel_notch_scrolls_the_folder_list_by_a_full_step_right_away() {
+    let mut big = Tree::new("D:\\");
+    let root = big.root();
+    for f in 0..300u64 {
+        big.add_child(root, &format!("file{f:03}.bin"), 1_000_000 - f, 0);
+    }
+    big.finalize();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_eframe(|cc| App::new(cc, Vec::new(), Method::Walk));
+    h.state_mut().set_tree(big, vec![PathBuf::from("D:\\")]);
+    wait(&mut h, "treemap", |app| app.loaded.is_some() && app.treemap.is_current());
+    let row_top = |h: &Harness<'_, App>| h.get_by_label("📄 file012.bin").rect().top();
+    h.hover_at(h.get_by_label("📄 file008.bin").rect().center());
+    h.run_steps(2);
+    let before = row_top(&h);
+
+    // The app does this in raw_input_hook, which the test harness does not call.
+    let speed = h.ctx.options(|o| o.input_options.line_scroll_speed);
+    let mut events = vec![wheel_event(egui::MouseWheelUnit::Line, -1.0, Modifiers::NONE)];
+    scroll_wheel_immediately(&mut events, speed);
+    for event in events {
+        h.event(event);
+    }
+    // egui takes the wheel input after laying out the list, so it shows in the next frame.
+    h.run_steps(2);
+    let moved = before - row_top(&h);
+    assert!((moved - speed).abs() < 0.5, "moved {moved} of {speed} points");
+}
+
+/// Prints frame times (UI pass plus tessellation) on a 400,000-file tree while hovering and
+/// scrolling: `cargo test --release --lib frame_cost -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn frame_cost() {
+    use crate::model::flags;
+    let mut big = Tree::new("D:\\");
+    let root = big.root();
+    for d in 0..200u64 {
+        let dir = big.add_child(root, &format!("folder {d:03}"), 0, flags::DIR);
+        for f in 0..2000u64 {
+            let size = 1000 + (d * 7919 + f * 104_729) % 5_000_000;
+            big.add_child(dir, &format!("file{f:04}.e{}", (d * 7 + f) % 40), size, 0);
+        }
+    }
+    big.finalize();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 840.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_eframe(|cc| App::new(cc, Vec::new(), Method::Walk));
+    h.state_mut().set_tree(big, vec![PathBuf::from("D:\\")]);
+    wait(&mut h, "treemap", |app| app.loaded.is_some() && app.treemap.is_current());
+    // Expand the first folder so the table has 2,000+ rows.
+    let first = tree(h.state()).node(tree(h.state()).root()).children[0];
+    let view = &mut h.state_mut().loaded.as_mut().unwrap().view;
+    view.expanded.insert(first);
+    view.rows_dirty = true;
+    h.run_steps(2);
+    let tiles: Vec<Pos2> = {
+        let t = tree(h.state());
+        t.node(first).children.iter().take(40).filter_map(|&c| h.state().treemap.tile_center(t, c)).collect()
+    };
+    assert!(!tiles.is_empty());
+
+    fn measure(h: &mut Harness<'_, App>, name: &str, mut input: impl FnMut(&mut Harness<'_, App>, usize)) {
+        let mut times: Vec<f64> = (0..120)
+            .map(|i| {
+                input(h, i);
+                let start = Instant::now();
+                h.step();
+                let shapes = h.output().shapes.clone();
+                h.ctx.tessellate(shapes, 1.0);
+                start.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        times.sort_by(f64::total_cmp);
+        let avg = times.iter().sum::<f64>() / times.len() as f64;
+        println!("{name:<28} avg {avg:6.2} ms   p95 {:6.2} ms   max {:6.2} ms", times[times.len() * 95 / 100], times[times.len() - 1]);
+    }
+    let wheel = |h: &mut Harness<'_, App>, dy: f32| {
+        h.event(Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, dy),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
+            modifiers: Modifiers::NONE,
+        });
+    };
+    measure(&mut h, "hover tree rows", |h, i| h.hover_at(egui::pos2(300.0, 90.0 + (i % 14) as f32 * 22.0)));
+    measure(&mut h, "scroll tree (wheel)", |h, i| {
+        h.hover_at(egui::pos2(300.0, 200.0));
+        wheel(h, if i % 40 < 20 { -1.0 } else { 1.0 });
+    });
+    measure(&mut h, "hover treemap", |h, i| h.hover_at(tiles[i % tiles.len()]));
+    h.state_mut().loaded.as_mut().unwrap().view.highlight_ext = Some(0);
+    measure(&mut h, "hover treemap + type shown", |h, i| h.hover_at(tiles[i % tiles.len()]));
+}
+
 /// Two temp folders stand in for drives so the test does not depend on the machine.
 fn fake_drives(h: &mut Harness<'_, App>, roots: &[&Path]) {
     h.state_mut().drives = roots

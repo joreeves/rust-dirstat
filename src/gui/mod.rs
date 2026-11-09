@@ -31,6 +31,10 @@ pub fn run(initial: Vec<PathBuf>, method: Method) -> anyhow::Result<()> {
             .with_icon(window_icon())
             .with_inner_size([1280.0, 840.0])
             .with_min_inner_size([720.0, 480.0]),
+        // Queue at most one frame for display (eframe's default is two), so hover highlights and
+        // scrolling keep up with the mouse pointer. The app has little GPU work, which is what
+        // egui's low-latency setting is meant for.
+        wgpu_options: eframe::WgpuConfiguration { surface: eframe::SurfaceConfig::LOW_LATENCY, ..Default::default() },
         ..Default::default()
     };
     eframe::run_native(
@@ -45,6 +49,38 @@ pub fn run(initial: Vec<PathBuf>, method: Method) -> anyhow::Result<()> {
         }),
     )
     .map_err(|e| anyhow::anyhow!("could not open the window: {e}"))
+}
+
+/// Largest wheel step egui applies at once; bigger ones it spreads over about 0.1 s.
+const IMMEDIATE_SCROLL_STEP: f32 = 7.0;
+
+/// Makes mouse-wheel scrolling move with the wheel. egui eases each wheel notch over several
+/// frames, so lists keep gliding after the wheel stops and the hover highlight trails the
+/// pointer meanwhile. It applies small point steps (as from a touchpad) immediately, so each
+/// notch is passed on as a run of those, all within the same frame.
+fn scroll_wheel_immediately(events: &mut Vec<egui::Event>, line_scroll_speed: f32) {
+    if !events.iter().any(|e| matches!(e, egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, .. })) {
+        return;
+    }
+    let mut out = Vec::with_capacity(events.len());
+    for event in events.drain(..) {
+        match event {
+            egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta, phase, source, modifiers } => {
+                let points = delta * line_scroll_speed;
+                let pieces = (points.length() / IMMEDIATE_SCROLL_STEP).ceil().clamp(1.0, 1000.0) as usize;
+                let piece = points / pieces as f32;
+                out.extend((0..pieces).map(|_| egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: piece,
+                    phase,
+                    source,
+                    modifiers,
+                }));
+            }
+            other => out.push(other),
+        }
+    }
+    *events = out;
 }
 
 /// The app icon for the title bar and taskbar (the .ico embedded by build.rs covers the exe).
@@ -739,6 +775,11 @@ fn apply_view_action(tree: &Tree, view: &mut View, action: Action) {
 }
 
 impl eframe::App for App {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let speed = ctx.options(|o| o.input_options.line_scroll_speed);
+        scroll_wheel_immediately(&mut raw_input.events, speed);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll();
