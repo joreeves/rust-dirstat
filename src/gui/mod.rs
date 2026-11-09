@@ -28,6 +28,7 @@ pub fn run(initial: Vec<PathBuf>, method: Method) -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(format!("{} {}", crate::APP_NAME, env!("CARGO_PKG_VERSION")))
+            .with_icon(window_icon())
             .with_inner_size([1280.0, 840.0])
             .with_min_inner_size([720.0, 480.0]),
         ..Default::default()
@@ -44,6 +45,11 @@ pub fn run(initial: Vec<PathBuf>, method: Method) -> anyhow::Result<()> {
         }),
     )
     .map_err(|e| anyhow::anyhow!("could not open the window: {e}"))
+}
+
+/// The app icon for the title bar and taskbar (the .ico embedded by build.rs covers the exe).
+fn window_icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icon-256.png")).expect("the bundled icon is a valid PNG")
 }
 
 /// Narrowest the File types panel can be dragged.

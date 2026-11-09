@@ -55,6 +55,7 @@ OutputBaseFilename={#OutputName}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\assets\rust-dirstat.ico
 UninstallDisplayName={#AppName}
 UninstallDisplayIcon={app}\{#AppExe}
 CloseApplications=yes

@@ -39,10 +39,16 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# build.rs embeds the icon and version details in the exe.
+[target.'cfg(windows)'.build-dependencies]
+winresource = { version = "0.1", default-features = false }
+
 [dev-dependencies]
 egui_kittest = { version = "0.37", features = ["eframe", "wgpu", "snapshot"] }
 # README screenshots use the same system fonts (for icons) as the real window.
 egui_system_font_provider = "0.37"
+# examples/make_icon.rs renders assets/icon.svg into the .ico and PNG.
+resvg = { version = "0.49", default-features = false }
 tempfile = "3.27"
 
 [profile.release]

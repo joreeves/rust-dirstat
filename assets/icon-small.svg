@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Simplified rust-dirstat icon for 16 to 24 px: three blocks on a pixel grid, so they stay
+       distinct when tiny. Regenerate with the make_icon example (examples/make_icon.rs). -->
+  <rect x="0" y="0" width="16" height="16" rx="3.5" fill="#2b1a12"/>
+  <rect x="2" y="2" width="7" height="12" rx="1" fill="#c2551e"/>
+  <rect x="10" y="2" width="4" height="7" rx="1" fill="#e5843a"/>
+  <rect x="10" y="10" width="4" height="4" rx="1" fill="#f0b257"/>
+</svg>
