@@ -257,15 +257,18 @@ fn multiple_drives_can_be_ticked_and_scanned_together() {
     let root = t.node(t.root());
     assert_eq!(root.size, 2_500_000);
     assert_eq!(root.children.len(), 2);
-    // Ticked drives are scanned in drive order.
+    // Ticked drives are scanned in drive order. The tree shows each location by its full path
+    // (temp folders can be 8.3 short names, e.g. RUNNER~1 on CI).
     let mut expected = vec![a.root.clone(), b.root.clone()];
     expected.sort();
-    assert_eq!(&*root.name, format!("{} + {}", expected[0].display(), expected[1].display()));
+    let shown: Vec<PathBuf> = expected.iter().map(|p| scan::normalize_root(p)).collect();
+    assert_eq!(&*root.name, format!("{} + {}", shown[0].display(), shown[1].display()));
     assert_eq!(app.loaded.as_ref().unwrap().targets, expected);
     // Each drive shows as its own top-level row, and paths below it stay absolute.
-    h.get_by_label(&format!("📁 {}", b.root.display()));
+    let b_shown = scan::normalize_root(&b.root);
+    h.get_by_label(&format!("📁 {}", b_shown.display()));
     let extra = node_named(app, "extra.iso");
-    assert_eq!(t.path_of(extra).unwrap(), b.root.join("extra.iso"));
+    assert_eq!(t.path_of(extra).unwrap(), b_shown.join("extra.iso"));
 
     // Rescan repeats the same multi-drive scan.
     h.get_by_label("⟳ Rescan").click();
