@@ -31,6 +31,19 @@ pub fn run(initial: Vec<PathBuf>, method: Method) -> anyhow::Result<()> {
             .with_icon(window_icon())
             .with_inner_size([1280.0, 840.0])
             .with_min_inner_size([720.0, 480.0]),
+        // Show each frame as soon as it is drawn, so hover highlights and scrolling keep up with
+        // the mouse pointer. With vsync, every frame waits for the display's next refresh (and
+        // eframe's default lets two wait in line): up to 31 ms per frame over Remote Desktop,
+        // whose display runs at about 32 Hz. The app only draws when something changes, so this
+        // doesn't keep the GPU busy, and in a normal window Windows' compositor still shows
+        // whole frames. wgpu falls back to vsync where it has to.
+        wgpu_options: eframe::WgpuConfiguration {
+            surface: eframe::SurfaceConfig {
+                present_mode: eframe::wgpu::PresentMode::AutoNoVsync,
+                desired_maximum_frame_latency: Some(1),
+            },
+            ..Default::default()
+        },
         ..Default::default()
     };
     eframe::run_native(
@@ -45,6 +58,38 @@ pub fn run(initial: Vec<PathBuf>, method: Method) -> anyhow::Result<()> {
         }),
     )
     .map_err(|e| anyhow::anyhow!("could not open the window: {e}"))
+}
+
+/// Largest wheel step egui applies at once; bigger ones it spreads over about 0.1 s.
+const IMMEDIATE_SCROLL_STEP: f32 = 7.0;
+
+/// Makes mouse-wheel scrolling move with the wheel. egui eases each wheel notch over several
+/// frames, so lists keep gliding after the wheel stops and the hover highlight trails the
+/// pointer meanwhile. It applies small point steps (as from a touchpad) immediately, so each
+/// notch is passed on as a run of those, all within the same frame.
+fn scroll_wheel_immediately(events: &mut Vec<egui::Event>, line_scroll_speed: f32) {
+    if !events.iter().any(|e| matches!(e, egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, .. })) {
+        return;
+    }
+    let mut out = Vec::with_capacity(events.len());
+    for event in events.drain(..) {
+        match event {
+            egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta, phase, source, modifiers } => {
+                let points = delta * line_scroll_speed;
+                let pieces = (points.length() / IMMEDIATE_SCROLL_STEP).ceil().clamp(1.0, 1000.0) as usize;
+                let piece = points / pieces as f32;
+                out.extend((0..pieces).map(|_| egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: piece,
+                    phase,
+                    source,
+                    modifiers,
+                }));
+            }
+            other => out.push(other),
+        }
+    }
+    *events = out;
 }
 
 /// The app icon for the title bar and taskbar (the .ico embedded by build.rs covers the exe).
@@ -739,6 +784,11 @@ fn apply_view_action(tree: &Tree, view: &mut View, action: Action) {
 }
 
 impl eframe::App for App {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let speed = ctx.options(|o| o.input_options.line_scroll_speed);
+        scroll_wheel_immediately(&mut raw_input.events, speed);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll();
@@ -752,7 +802,8 @@ impl eframe::App for App {
 
         if let Some(job) = &self.scan {
             egui::CentralPanel::default().show(ui, |ui| scanning_ui(ui, job, &mut actions));
-            ctx.request_repaint_after(Duration::from_millis(100));
+            // About 60 fps for the spinner and counters (frames aren't paced by vsync).
+            ctx.request_repaint_after(Duration::from_millis(16));
         } else if let Some(loaded) = &mut self.loaded {
             let tree = loaded.tree.clone();
             let height = ui.available_height();
@@ -785,11 +836,31 @@ impl eframe::App for App {
     }
 }
 
+/// egui's spinner, except that it leaves repainting to the caller. egui's asks for the next
+/// frame right away, which without vsync means redrawing as fast as the GPU allows.
+fn spinner(ui: &mut egui::Ui) {
+    let size = ui.style().spacing.interact_size.y;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    response.widget_info(|| egui::WidgetInfo::new(egui::Role::ProgressIndicator));
+    let radius = size * 0.5 - 2.0;
+    let n = (radius.round() as usize).clamp(8, 128);
+    let time = ui.input(|i| i.time);
+    let start = time * std::f64::consts::TAU;
+    let end = start + 240f64.to_radians() * time.sin();
+    let points = (0..n)
+        .map(|i| {
+            let (sin, cos) = (start + (end - start) * i as f64 / n as f64).sin_cos();
+            rect.center() + radius * egui::vec2(cos as f32, sin as f32)
+        })
+        .collect();
+    ui.painter().add(egui::Shape::line(points, egui::Stroke::new(3.0, ui.visuals().strong_text_color())));
+}
+
 fn scanning_ui(ui: &mut egui::Ui, job: &ScanJob, actions: &mut Vec<Action>) {
     let p = &job.progress;
     ui.vertical_centered(|ui| {
         ui.add_space(48.0);
-        ui.spinner();
+        spinner(ui);
         ui.add_space(8.0);
         ui.heading(format!("Scanning {}", paths_label(&job.paths)));
         ui.add_space(12.0);
