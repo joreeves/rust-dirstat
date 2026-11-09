@@ -65,7 +65,7 @@ fn write(path: &Path, len: usize) {
 
 fn fixture() -> (PathBuf, tempfile::TempDir) {
     let base = std::env::var_os("DIRSTAT_TEST_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    let dir = tempfile::Builder::new().prefix("dirstat-mft-").tempdir_in(base).unwrap();
+    let dir = tempfile::Builder::new().prefix("rust-dirstat-mft-").tempdir_in(base).unwrap();
     let root = dir.path().to_path_buf();
     write(&root.join("empty.bin"), 0);
     write(&root.join("resident.txt"), 100);

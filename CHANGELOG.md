@@ -1,10 +1,17 @@
 # Changelog
 
-All notable changes to dirstat are listed here. The format follows
+All notable changes to rust-dirstat are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### Changed
+
+- The command and executable are now `rust-dirstat` (`rust-dirstat.exe`), matching the app's
+  name. For example, `dirstat scan C:\` is now `rust-dirstat scan C:\`.
+- Upgrading with the installer removes the old `dirstat.exe`. The Start menu shortcut and
+  the PATH entry carry over.
 
 ## [0.1.0] - 2026-11-08
 
