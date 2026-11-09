@@ -22,11 +22,13 @@ struct Key {
     size: [usize; 2],
     generation: u64,
     dark: bool,
+    /// File type drawn highlighted (baked into the image, so hovering costs nothing extra).
+    highlight: Option<u32>,
 }
 
 struct Rendered {
     key: Key,
-    layout: Layout,
+    layout: Arc<Layout>,
     image: ColorImage,
 }
 
@@ -34,7 +36,7 @@ struct Rendered {
 pub struct TreemapView {
     texture: Option<TextureHandle>,
     /// Layout matching the current texture.
-    layout: Option<Layout>,
+    layout: Option<Arc<Layout>>,
     shown: Option<Key>,
     pending: Option<mpsc::Receiver<Rendered>>,
     wanted: Option<(Key, Instant)>,
@@ -56,24 +58,37 @@ impl TreemapView {
         self.generation += 1;
     }
 
-    /// Screen position of the center of the tile showing `id`, if it has its own tile.
+    /// Screen rectangle of the tile showing `id`, if it has its own tile.
     #[cfg(test)]
-    pub(crate) fn tile_center(&self, tree: &Tree, id: NodeId) -> Option<Pos2> {
+    pub(crate) fn tile_rect(&self, tree: &Tree, id: NodeId) -> Option<Rect> {
         let (layout, rect) = (self.layout.as_ref()?, self.last_rect?);
         let (idx, exact) = layout.find(tree, id)?;
         let r = layout.items[idx].rect;
+        let (sx, sy) = (rect.width() / layout.width, rect.height() / layout.height);
         exact.then(|| {
-            pos2(
-                rect.min.x + (r.x0 + r.x1) / 2.0 * rect.width() / layout.width,
-                rect.min.y + (r.y0 + r.y1) / 2.0 * rect.height() / layout.height,
+            Rect::from_min_max(
+                pos2(rect.min.x + r.x0 * sx, rect.min.y + r.y0 * sy),
+                pos2(rect.min.x + r.x1 * sx, rect.min.y + r.y1 * sy),
             )
         })
+    }
+
+    /// Screen position of the center of the tile showing `id`, if it has its own tile.
+    #[cfg(test)]
+    pub(crate) fn tile_center(&self, tree: &Tree, id: NodeId) -> Option<Pos2> {
+        self.tile_rect(tree, id).map(|r| r.center())
     }
 
     /// True once a rendered image for the current tree is on screen.
     #[cfg(test)]
     pub(crate) fn is_current(&self) -> bool {
         self.shown.is_some_and(|k| k.generation == self.generation) && self.pending.is_none()
+    }
+
+    /// The file type highlighted in the image on screen (`None` before the first image).
+    #[cfg(test)]
+    pub(crate) fn shown_highlight(&self) -> Option<Option<u32>> {
+        self.shown.map(|k| k.highlight)
     }
 
     /// True once the image on screen is current and rooted at `zoom`.
@@ -115,7 +130,7 @@ pub fn show(ui: &mut egui::Ui, tree: &Arc<Tree>, view: &mut View, tm: &mut Treem
         ((rect.height() * ppp).round() as usize).clamp(1, max_side),
     ];
     let background = ui.visuals().extreme_bg_color;
-    let key = Key { zoom: view.zoom, size, generation: tm.generation, dark: ui.visuals().dark_mode };
+    let key = Key { zoom: view.zoom, size, generation: tm.generation, dark: ui.visuals().dark_mode, highlight: view.highlight_ext };
 
     receive(tm, &ctx);
     request(tm, tree, key, background, &ctx);
@@ -146,24 +161,6 @@ pub fn show(ui: &mut egui::Ui, tree: &Arc<Tree>, view: &mut View, tm: &mut Treem
         )
     };
     let hit = |p: Pos2| layout.hit_test((p.x - rect.min.x) / sx, (p.y - rect.min.y) / sy);
-
-    if let Some(ext) = view.highlight_ext {
-        let mut drawn = 0;
-        for item in layout.items.iter().filter(|i| i.is_leaf() && !i.merged && i.color_ext == ext) {
-            if !tree.node(item.node).is_file() {
-                continue;
-            }
-            let r = to_screen(item.rect);
-            painter.rect_filled(r, 0.0, Color32::from_white_alpha(110));
-            if r.width() > 3.0 && r.height() > 3.0 {
-                painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::WHITE), StrokeKind::Inside);
-            }
-            drawn += 1;
-            if drawn > 50_000 {
-                break;
-            }
-        }
-    }
 
     if let Some(sel) = view.selected
         && tree.is_reachable(sel)
@@ -208,11 +205,6 @@ fn tooltip(ui: &mut egui::Ui, tree: &Tree, zoom: NodeId, layout: &Layout, i: usi
     let item = &layout.items[i];
     let n = tree.node(item.node);
     let zoom_size = tree.node(zoom).size;
-    if item.merged {
-        ui.strong(format!("Many small items in {}", n.name));
-        ui.label("Zoom in to see them individually.");
-        return;
-    }
     let path = tree.path_of(item.node).map(|p| p.display().to_string()).unwrap_or_else(|| n.name.to_string());
     ui.strong(&*n.name);
     ui.label(RichText::new(path).monospace().weak());
@@ -254,23 +246,34 @@ fn request(tm: &mut TreemapView, tree: &Arc<Tree>, key: Key, background: Color32
             Duration::ZERO
         }
     };
-    let resize_only = tm.shown.is_some_and(|s| s.zoom == key.zoom && s.generation == key.generation && s.dark == key.dark);
+    let resize_only = tm.shown.is_some_and(|s| {
+        s.zoom == key.zoom && s.generation == key.generation && s.dark == key.dark && s.highlight == key.highlight
+    });
     let delay = if resize_only { Duration::from_millis(150) } else { Duration::ZERO };
     if tm.pending.is_none() && since >= delay {
-        tm.pending = Some(spawn_render(tree.clone(), key, background, ctx.clone()));
+        // Only the highlight changed: draw the same layout again.
+        let same_layout = tm.shown.is_some_and(|s| Key { highlight: key.highlight, ..s } == key);
+        let layout = tm.layout.clone().filter(|_| same_layout);
+        tm.pending = Some(spawn_render(tree.clone(), key, layout, background, ctx.clone()));
     } else {
         ctx.request_repaint_after(delay.saturating_sub(since).max(Duration::from_millis(16)));
     }
 }
 
-fn spawn_render(tree: Arc<Tree>, key: Key, background: Color32, ctx: egui::Context) -> mpsc::Receiver<Rendered> {
+fn spawn_render(
+    tree: Arc<Tree>,
+    key: Key,
+    layout: Option<Arc<Layout>>,
+    background: Color32,
+    ctx: egui::Context,
+) -> mpsc::Receiver<Rendered> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("treemap".into())
         .spawn(move || {
             let [w, h] = key.size;
-            let layout = treemap::layout(&tree, key.zoom, w as f32, h as f32);
-            let pixels = treemap::render(&layout, w, h, background);
+            let layout = layout.unwrap_or_else(|| Arc::new(treemap::layout(&tree, key.zoom, w as f32, h as f32)));
+            let pixels = treemap::render(&layout, &tree, w, h, background, key.highlight);
             let image = ColorImage::new([w, h], pixels);
             let _ = tx.send(Rendered { key, layout, image });
             ctx.request_repaint();
