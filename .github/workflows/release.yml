@@ -76,10 +76,20 @@ jobs:
         run: cargo build --release --locked
 
       - name: Install Inno Setup
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $setup = "$env:RUNNER_TEMP\innosetup-$env:INNO_VERSION.exe"
           $tag = "is-" + $env:INNO_VERSION.Replace('.', '_')
-          Invoke-WebRequest "https://github.com/jrsoftware/issrc/releases/download/$tag/innosetup-$env:INNO_VERSION.exe" -OutFile $setup
+          # Download through the API with the job's token: GitHub throttles anonymous release
+          # downloads at busy times (504s). Retry a few times for other hiccups.
+          for ($attempt = 1; ; $attempt++) {
+            gh release download $tag --repo jrsoftware/issrc --pattern "innosetup-$env:INNO_VERSION.exe" --dir $env:RUNNER_TEMP --clobber
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $setup)) { break }
+            if ($attempt -ge 5) { throw "Could not download Inno Setup $env:INNO_VERSION" }
+            Write-Warning "Download attempt $attempt failed; retrying"
+            Start-Sleep -Seconds (15 * $attempt)
+          }
           $hash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
           if ($hash -ne $env:INNO_SHA256) { throw "Inno Setup download has SHA-256 $hash, expected $env:INNO_SHA256" }
           # Portable mode: unpacks the compiler without installing it.
