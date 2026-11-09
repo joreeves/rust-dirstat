@@ -6,6 +6,8 @@ All notable changes to rust-dirstat are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-09
+
 ### Changed
 
 - The command and executable are now `rust-dirstat` (`rust-dirstat.exe`), matching the app's
@@ -37,5 +39,6 @@ First release.
   the status bar. `dirstat check-update` does the same from a terminal. Set
   `DIRSTAT_NO_UPDATE_CHECK=1` to turn it off.
 
-[Unreleased]: https://github.com/joreeves/rust-dirstat/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/joreeves/rust-dirstat/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/joreeves/rust-dirstat/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/joreeves/rust-dirstat/releases/tag/v0.1.0
