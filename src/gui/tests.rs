@@ -209,6 +209,16 @@ fn update_notice_appears_when_a_newer_release_is_found() {
     assert_eq!(h.state().update.as_ref().map(|r| r.url.as_str()), Some(url));
 }
 
+#[test]
+fn window_icon_is_the_256px_app_icon() {
+    let icon = window_icon();
+    assert_eq!((icon.width, icon.height), (256, 256));
+    assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+    // Transparent corners (rounded tile), opaque centre.
+    assert_eq!(icon.rgba[3], 0, "top-left corner is transparent");
+    assert_eq!(icon.rgba[(128 * 256 + 128) * 4 + 3], 255, "centre is opaque");
+}
+
 /// Two temp folders stand in for drives so the test does not depend on the machine.
 fn fake_drives(h: &mut Harness<'_, App>, roots: &[&Path]) {
     h.state_mut().drives = roots

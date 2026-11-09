@@ -6,6 +6,12 @@ All notable changes to rust-dirstat are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- An app icon: treemap blocks in rust, copper and amber. It shows on the window and taskbar,
+  on `rust-dirstat.exe` in File Explorer, on the Start menu shortcut and on the installer.
+- Version details on `rust-dirstat.exe` (shown in its Properties and in Task Manager).
+
 ## [0.2.0] - 2026-11-09
 
 ### Changed

@@ -1,3 +1,5 @@
+<img src="assets/icon.svg" alt="rust-dirstat icon" width="72">
+
 # rust-dirstat
 
 A WinDirStat-style disk usage analyzer for Windows, written in Rust. It scans drives or folders and shows where the space goes in three views:
@@ -164,6 +166,8 @@ To build the installer locally, install [Inno Setup 6](https://jrsoftware.org/is
 | `src/export.rs`, `src/cli.rs` | CSV/JSON writers and the text report |
 | `src/update.rs` | Update check against the latest GitHub release |
 | `installer/rust-dirstat.iss` | Inno Setup script for the installer |
+| `assets/` | App icon: `icon.svg` (with `icon-small.svg` for 16–24 px) is the source; `rust-dirstat.ico` and `icon-256.png` are generated from it by `cargo run --example make_icon` |
+| `build.rs` | Embeds the icon and version details in `rust-dirstat.exe` |
 
 ## License
 
