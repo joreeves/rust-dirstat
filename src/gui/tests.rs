@@ -160,14 +160,18 @@ fn welcome_screen_offers_drives_and_folder_picker() {
         .build_eframe(|cc| App::new(cc, Vec::new(), Method::Auto));
     h.run_steps(3);
     assert!(h.state().loaded.is_none() && h.state().scan.is_none());
-    h.get_by_label_contains("Pick a drive or folder");
+    h.get_by_label_contains("Select one or more drives");
     assert_eq!(h.query_all_by_label("📂 Open folder…").count(), 2, "toolbar + welcome button");
     for d in &h.state().drives {
         h.get_by_label(&d.root.display().to_string());
     }
-    // Clicking a drive button starts a scan (cancel it right away).
+    // Clicking a drive only selects it; the Scan button starts the scan (cancelled right away).
     if let Some(d) = h.state().drives.first().cloned() {
         h.get_by_label(&d.root.display().to_string()).click();
+        h.run_steps(2);
+        assert!(h.state().scan.is_none(), "selecting a drive must not scan");
+        assert!(h.state().selected_drives.contains(&d.root));
+        h.get_by_label("Scan 1 selected drive").click();
         h.step();
         h.step();
         assert!(h.state().scan.is_some(), "scan started for {}", d.root.display());
@@ -204,11 +208,19 @@ fn multiple_drives_can_be_ticked_and_scanned_together() {
     h.run_steps(2);
     assert!(h.state().scan.is_none());
 
+    // The drive button and the checkbox both select a drive, and neither starts a scan.
+    h.get_by_label(&a.root.display().to_string()).click();
+    h.run_steps(2);
+    assert_eq!(h.state().selected_drives.len(), 1);
+    h.get_by_label(&a.root.display().to_string()).click();
+    h.run_steps(2);
+    assert!(h.state().selected_drives.is_empty(), "clicking again deselects");
     for checkbox in h.get_all_by_role(egui::accesskit::Role::CheckBox) {
         checkbox.click();
     }
     h.run_steps(2);
     assert_eq!(h.state().selected_drives.len(), 2);
+    assert!(h.state().scan.is_none());
     h.get_by_label("Scan 2 selected drives").click();
     h.step();
     wait(&mut h, "multi-drive scan", |app| app.loaded.is_some() && app.treemap.is_current());
@@ -244,12 +256,20 @@ fn drives_menu_stays_open_while_ticking() {
     h.run_steps(2);
     let boxes = h.get_all_by_role(egui::accesskit::Role::CheckBox).count();
     assert_eq!(boxes, 2);
-    h.get_all_by_role(egui::accesskit::Role::CheckBox).next().unwrap().click();
-    h.run_steps(2);
-    assert_eq!(h.state().selected_drives.len(), 1);
+    let before = h.state().loaded.as_ref().unwrap().targets.clone();
+    for i in 0..2 {
+        h.get_all_by_role(egui::accesskit::Role::CheckBox).nth(i).unwrap().click();
+        h.run_steps(2);
+        assert_eq!(h.state().selected_drives.len(), i + 1);
+        assert!(h.state().scan.is_none(), "ticking a drive must not scan");
+    }
     // Still open: the checkboxes and scan buttons are still there.
-    h.get_by_label("Scan 1 selected drive");
     assert_eq!(h.get_all_by_role(egui::accesskit::Role::CheckBox).count(), 2);
+    assert_eq!(h.state().loaded.as_ref().unwrap().targets, before);
+    h.get_by_label("Scan 2 selected drives").click();
+    h.step();
+    assert!(h.state().scan.as_ref().is_some_and(|s| s.paths.len() == 2));
+    wait(&mut h, "multi-drive scan from the menu", |app| app.loaded.is_some());
 }
 
 #[test]
