@@ -37,6 +37,8 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 egui_kittest = { version = "0.37", features = ["eframe", "wgpu", "snapshot"] }
+# README screenshots use the same system fonts (for icons) as the real window.
+egui_system_font_provider = "0.37"
 tempfile = "3.27"
 
 [profile.release]

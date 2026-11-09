@@ -10,6 +10,8 @@ use egui_kittest::kittest::Queryable;
 
 use super::*;
 
+mod screenshots;
+
 struct Fixture {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -157,7 +159,8 @@ fn welcome_screen_offers_drives_and_folder_picker() {
         .with_step_dt(1.0 / 60.0)
         .with_accessibility_check(false)
         .allow_missing_glyphs()
-        .build_eframe(|cc| App::new(cc, Vec::new(), Method::Auto));
+        // Walk, so an elevated run (CI) does not start a raw-volume MFT read of a real drive.
+        .build_eframe(|cc| App::new(cc, Vec::new(), Method::Walk));
     h.run_steps(3);
     assert!(h.state().loaded.is_none() && h.state().scan.is_none());
     h.get_by_label_contains("Select one or more drives");
