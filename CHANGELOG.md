@@ -19,6 +19,9 @@ All notable changes to rust-dirstat are listed here. The format follows
   over Remote Desktop, where the display refreshes only about 30 times a second.
 - Mouse-wheel scrolling moves the lists a full step at once, instead of easing in over several
   frames while the highlight lags behind.
+- The treemap no longer lumps a folder's smallest files into one tile that looked like a single
+  file but selected the folder. Every file now has its own tile, however small, so pointing at
+  one shows and selects that file.
 
 ## [0.2.0] - 2026-11-09
 

@@ -7,10 +7,10 @@ use crate::model::{NO_EXT, NodeId, Tree};
 pub const CUSHION_HEIGHT: f32 = 0.38;
 /// Ridge height multiplier per nesting level.
 pub const CUSHION_SCALE: f32 = 0.91;
-/// Directories smaller than this (in pixels, either side) are drawn as one tile.
-const MIN_SUBDIVIDE: f32 = 3.0;
-/// Children whose tile would be smaller than this many square pixels are merged into one tile.
-const MIN_ITEM_AREA: f64 = 2.0;
+/// Directories whose tile is smaller than this many square pixels (about 2 x 2) are drawn as one
+/// tile, in the color of their largest file. Larger ones are split into a tile per child, however
+/// small: tiles under a pixel go to whichever wins the rounding when drawn, as in WinDirStat.
+const MIN_SUBDIVIDE_AREA: f32 = 4.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct Rect {
@@ -41,7 +41,7 @@ impl Rect {
 #[derive(Clone, Copy, Debug)]
 pub struct LayoutItem {
     pub rect: Rect,
-    /// The tree node shown by this tile. For merged tiles of tiny children, the parent.
+    /// The tree node shown by this tile.
     pub node: NodeId,
     /// Children occupy `items[first_child..first_child + child_count]`.
     pub first_child: u32,
@@ -51,8 +51,6 @@ pub struct LayoutItem {
     /// Extension index used to color this tile when it is a leaf.
     pub color_ext: u32,
     pub depth: u16,
-    /// True for a tile that merges many tiny children of `node`.
-    pub merged: bool,
 }
 
 impl LayoutItem {
@@ -98,7 +96,7 @@ impl Layout {
             let it = &self.items[cur];
             let start = it.first_child as usize;
             let found = (start..start + it.child_count as usize)
-                .find(|&c| self.items[c].node == want && !self.items[c].merged);
+                .find(|&c| self.items[c].node == want);
             match found {
                 Some(c) => cur = c,
                 None => return Some((cur, false)),
@@ -125,7 +123,6 @@ pub fn layout(tree: &Tree, root: NodeId, width: f32, height: f32) -> Layout {
         surface,
         color_ext: leaf_color(tree, root),
         depth: 0,
-        merged: false,
     });
 
     let mut values = Vec::new();
@@ -135,51 +132,32 @@ pub fn layout(tree: &Tree, root: NodeId, width: f32, height: f32) -> Layout {
         let it = items[i];
         i += 1;
         let node = tree.node(it.node);
-        if it.merged || !node.is_dir() || node.size == 0 || it.rect.width() < MIN_SUBDIVIDE || it.rect.height() < MIN_SUBDIVIDE {
+        if !node.is_dir() || node.size == 0 || it.rect.area() < MIN_SUBDIVIDE_AREA {
             continue;
         }
+        // Children are sorted largest first, so the empty ones come last.
         let kids: Vec<NodeId> = node.children.iter().copied().filter(|&c| tree.node(c).size > 0).collect();
         if kids.is_empty() {
             continue;
         }
-        // Children are sorted largest first; merge the tail of sub-pixel children into one tile.
-        let px_per_byte = f64::from(it.rect.area()) / node.size as f64;
-        let mut keep = kids.len();
-        while keep > 1 && (tree.node(kids[keep - 1]).size as f64 * px_per_byte) < MIN_ITEM_AREA {
-            keep -= 1;
-        }
-        let tail_bytes: u64 = kids[keep..].iter().map(|&c| tree.node(c).size).sum();
-        if keep < kids.len() && keep + 1 == kids.len() {
-            keep = kids.len(); // a single tiny child does not need merging
-        }
         values.clear();
-        values.extend(kids[..keep].iter().map(|&c| tree.node(c).size as f64));
-        let merged_tail = keep < kids.len();
-        if merged_tail {
-            values.push(tail_bytes as f64);
-        }
+        values.extend(kids.iter().map(|&c| tree.node(c).size as f64));
         rects.clear();
         squarify(&values, it.rect, &mut rects);
 
         let h = CUSHION_HEIGHT * CUSHION_SCALE.powi(i32::from(it.depth) + 1);
         let first = items.len() as u32;
-        for (k, r) in rects.iter().enumerate() {
+        for (&kid, r) in kids.iter().zip(&rects) {
             let mut s = it.surface;
             add_ridge(&mut s, *r, h);
-            let (node_id, merged, color_ext) = if k < keep {
-                (kids[k], false, leaf_color(tree, kids[k]))
-            } else {
-                (it.node, true, leaf_color(tree, kids[keep]))
-            };
             items.push(LayoutItem {
                 rect: *r,
-                node: node_id,
+                node: kid,
                 first_child: 0,
                 child_count: 0,
                 surface: s,
-                color_ext,
+                color_ext: leaf_color(tree, kid),
                 depth: it.depth + 1,
-                merged,
             });
         }
         items[i - 1].first_child = first;
@@ -344,23 +322,67 @@ mod tests {
         )
     }
 
+    fn named(t: &Tree, name: &str) -> NodeId {
+        t.preorder(t.root(), None).map(|(id, _)| id).find(|&id| &*t.node(id).name == name).unwrap()
+    }
+
     #[test]
-    fn layout_merges_tiny_children_and_hit_tests() {
+    fn every_file_gets_its_own_tile_however_small() {
         let t = tree();
         let lay = layout(&t, t.root(), 400.0, 300.0);
-        assert!(lay.items.len() < 100, "tiny files should be merged, got {} items", lay.items.len());
-        assert!(lay.items.iter().any(|i| i.merged));
-        // Every leaf tile is inside the root, and leaves tile the full area.
+        // The root, d, a.mp4 and all 5,001 files in d (each tiny file is under 0.01 px²).
+        assert_eq!(lay.items.len(), 3 + 5001);
+        // Zero-size nodes get no tile.
+        assert!(lay.items.iter().all(|i| &*t.node(i.node).name != "zero"));
+        // Leaves tile the full area.
         let leaf_area: f32 = lay.items.iter().filter(|i| i.is_leaf()).map(|i| i.rect.area()).sum();
         assert!((leaf_area - 400.0 * 300.0).abs() < 1.0);
-        // Hit test returns a leaf and find() maps back to the same tile.
-        let huge = t.preorder(t.root(), None).map(|(id, _)| id).find(|&id| &*t.node(id).name == "huge.bin").unwrap();
-        let (idx, exact) = lay.find(&t, huge).unwrap();
-        assert!(exact);
+        // Wherever you point, the tile is a file, never the folder around it.
+        for y in (0..300).step_by(7) {
+            for x in (0..400).step_by(7) {
+                let i = lay.hit_test(x as f32 + 0.5, y as f32 + 0.5).unwrap();
+                let n = t.node(lay.items[i].node);
+                assert!(n.is_file(), "({x}, {y}) shows {}", n.name);
+            }
+        }
+        // find() maps a file, large or tiny, to its own tile.
+        for name in ["huge.bin", "tiny4999.log"] {
+            let id = named(&t, name);
+            let (idx, exact) = lay.find(&t, id).unwrap();
+            assert!(exact, "{name}");
+            assert_eq!(lay.items[idx].node, id);
+        }
+        let (idx, _) = lay.find(&t, named(&t, "huge.bin")).unwrap();
         let r = lay.items[idx].rect;
         assert_eq!(lay.hit_test((r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0), Some(idx));
         assert_eq!(lay.hit_test(-1.0, 5.0), None);
-        // Zero-size nodes get no tile.
-        assert!(lay.items.iter().all(|i| &*t.node(i.node).name != "zero"));
+    }
+
+    #[test]
+    fn thin_folders_are_split_and_dot_sized_ones_are_not() {
+        let file = |n: &str, s: u64| ScanNode { name: n.into(), size: s, flags: 0, children: vec![] };
+        let dir = |n: &str, children| ScanNode { name: n.into(), size: 0, flags: flags::DIR, children };
+        let t = Tree::from_scan(
+            "R:\\",
+            dir(
+                "R",
+                vec![
+                    dir("strip", vec![file("s1.bin", 600), file("s2.bin", 400)]),
+                    dir("dot", vec![file("d1.bin", 2), file("d2.bin", 1)]),
+                    file("big.bin", 299_000),
+                ],
+            ),
+        );
+        // A folder drawn 2 px wide still shows its files.
+        let strip = named(&t, "strip");
+        let lay = layout(&t, strip, 2.0, 500.0);
+        assert_eq!(lay.items.len(), 3);
+        assert_eq!(lay.find(&t, named(&t, "s2.bin")).map(|(_, exact)| exact), Some(true));
+        // A folder smaller than about 2 x 2 px is one tile; its files map to it.
+        let lay = layout(&t, t.root(), 300.0, 100.0);
+        let dot = named(&t, "dot");
+        let (idx, exact) = lay.find(&t, named(&t, "d1.bin")).unwrap();
+        assert_eq!((lay.items[idx].node, exact), (dot, false));
+        assert!(lay.items[idx].is_leaf());
     }
 }

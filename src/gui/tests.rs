@@ -251,6 +251,58 @@ fn wheel_notches_are_passed_on_as_steps_egui_applies_at_once() {
     assert!((total - egui::vec2(0.0, -120.0)).length() < 1e-3, "3 lines at 40 points each, got {total:?}");
 }
 
+/// Shows a tree built in memory, without scanning.
+fn start_with_tree(t: Tree) -> Harness<'static, App> {
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_eframe(|cc| App::new(cc, Vec::new(), Method::Walk));
+    h.state_mut().set_tree(t, vec![PathBuf::from("D:\\")]);
+    wait(&mut h, "treemap", |app| app.loaded.is_some() && app.treemap.is_current());
+    h
+}
+
+#[test]
+fn clicking_among_many_small_files_selects_a_file_not_their_folder() {
+    // Like a browser cache: a few large files and thousands of small ones in one folder.
+    use crate::model::flags;
+    let mut t = Tree::new("D:\\");
+    let root = t.root();
+    let cache = t.add_child(root, "cache", 0, flags::DIR);
+    for i in 0..4u64 {
+        t.add_child(cache, &format!("large{i}_0"), 25_000_000, 0);
+    }
+    // Each under 2 px² of the treemap: together about an eighth of it.
+    for i in 0..40_000u64 {
+        t.add_child(cache, &format!("small{i:05}_0"), 400 + (i * 37) % 600, 0);
+    }
+    t.add_child(root, "video.mp4", 100_000_000, 0);
+    t.finalize();
+    let mut h = start_with_tree(t);
+
+    // Each small file has a tile, and clicking it selects that file.
+    for name in ["small00000_0", "small20000_0", "small39999_0"] {
+        let id = node_named(h.state(), name);
+        let pos = tile_center(&h, id);
+        click_at(&mut h, pos, PointerButton::Primary);
+        assert_eq!(view(h.state()).selected, Some(id), "{name}");
+    }
+    // Nowhere in the folder's area does a click select the folder itself.
+    let cache = node_named(h.state(), "cache");
+    let area = h.state().treemap.tile_rect(tree(h.state()), cache).expect("folder tile");
+    for fy in [0.05, 0.35, 0.65, 0.95] {
+        for fx in [0.05, 0.35, 0.65, 0.95] {
+            let pos = area.lerp_inside(egui::vec2(fx, fy));
+            click_at(&mut h, pos, PointerButton::Primary);
+            let selected = view(h.state()).selected.expect("a selection");
+            let n = tree(h.state()).node(selected);
+            assert!(n.is_file(), "clicking {pos:?} selected {}", n.name);
+        }
+    }
+}
+
 #[test]
 fn a_wheel_notch_scrolls_the_folder_list_by_a_full_step_right_away() {
     let mut big = Tree::new("D:\\");
@@ -259,14 +311,7 @@ fn a_wheel_notch_scrolls_the_folder_list_by_a_full_step_right_away() {
         big.add_child(root, &format!("file{f:03}.bin"), 1_000_000 - f, 0);
     }
     big.finalize();
-    let mut h = Harness::builder()
-        .with_size(egui::vec2(1200.0, 800.0))
-        .with_step_dt(1.0 / 60.0)
-        .with_accessibility_check(false)
-        .allow_missing_glyphs()
-        .build_eframe(|cc| App::new(cc, Vec::new(), Method::Walk));
-    h.state_mut().set_tree(big, vec![PathBuf::from("D:\\")]);
-    wait(&mut h, "treemap", |app| app.loaded.is_some() && app.treemap.is_current());
+    let mut h = start_with_tree(big);
     let row_top = |h: &Harness<'_, App>| h.get_by_label("📄 file012.bin").rect().top();
     h.hover_at(h.get_by_label("📄 file008.bin").rect().center());
     h.run_steps(2);
@@ -561,10 +606,12 @@ fn extension_row_toggles_treemap_highlight() {
     h.step();
     h.step();
     assert_eq!(view(h.state()).highlight_ext, Some(bin));
+    wait(&mut h, "highlighted treemap", |app| app.treemap.shown_highlight() == Some(Some(bin)));
     h.get_by_label("Clear highlight").click();
     h.step();
     h.step();
     assert_eq!(view(h.state()).highlight_ext, None);
+    wait(&mut h, "plain treemap", |app| app.treemap.shown_highlight() == Some(None));
 }
 
 #[test]
