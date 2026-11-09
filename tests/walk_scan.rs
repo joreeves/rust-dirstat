@@ -68,6 +68,11 @@ fn walk_counts_sizes_and_skips_junctions() {
 
 #[test]
 fn auto_method_falls_back_when_not_elevated() {
+    if platform::is_elevated() {
+        // Elevated runs (e.g. CI) take the MFT path, which may not see a just-created folder
+        // until NTFS flushes it; tests/mft_admin.rs covers that path.
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     write(&dir.path().join("f.bin"), 4096);
     let tree = scan::scan(dir.path(), Method::Auto, &Progress::new()).unwrap();

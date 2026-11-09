@@ -26,7 +26,7 @@ use crate::util::{format_count, format_size};
 pub fn run(initial: Vec<PathBuf>, method: Method) -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("dirstat")
+            .with_title(concat!("dirstat ", env!("CARGO_PKG_VERSION")))
             .with_inner_size([1280.0, 840.0])
             .with_min_inner_size([720.0, 480.0]),
         ..Default::default()

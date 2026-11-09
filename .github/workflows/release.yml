@@ -1,0 +1,97 @@
+# Builds, tests and packages the Windows binary.
+#   - Pull requests and manual runs: the zip is attached to the run as an artifact.
+#   - Tags named vX.Y.Z: the zip is also published as a GitHub release, with the notes taken
+#     from that version's section in CHANGELOG.md.
+name: Build and release
+
+on:
+  pull_request:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Work out the version
+        id: version
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            if ($env:GITHUB_REF_NAME -ne "v$version") {
+              throw "Tag $env:GITHUB_REF_NAME does not match the version in Cargo.toml ($version)"
+            }
+            # Release notes: this version's section of CHANGELOG.md.
+            $notes = @(); $found = $false
+            foreach ($line in Get-Content CHANGELOG.md) {
+              if ($line -match '^\[[^\]]+\]: ') { break }  # link definitions at the end
+              if ($line -match '^## \[') {
+                if ($found) { break }
+                $found = $line -match "^## \[$([regex]::Escape($version))\]"
+                continue
+              }
+              if ($found) { $notes += $line }
+            }
+            if (-not $found) { throw "CHANGELOG.md has no section for $version" }
+            $notes -join "`n" | Set-Content release-notes.md -Encoding utf8
+            $label = "v$version"
+          } else {
+            $label = "v$version-dev.$($env:GITHUB_SHA.Substring(0, 7))"
+          }
+          "label=$label" >> $env:GITHUB_OUTPUT
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        id: package
+        run: |
+          $name = "dirstat-${{ steps.version.outputs.label }}-windows-x64"
+          New-Item -ItemType Directory -Force dist/$name | Out-Null
+          Copy-Item target/release/dirstat.exe, README.md, CHANGELOG.md dist/$name
+          Compress-Archive -Path dist/$name/* -DestinationPath dist/$name.zip
+          $hash = (Get-FileHash dist/$name.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Set-Content dist/$name.zip.sha256 -Encoding ascii
+          "name=$name" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: |
+            dist/${{ steps.package.outputs.name }}.zip
+            dist/${{ steps.package.outputs.name }}.zip.sha256
+          retention-days: 14
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $name = "${{ steps.package.outputs.name }}"
+          gh release create $env:GITHUB_REF_NAME dist/$name.zip dist/$name.zip.sha256 `
+            --verify-tag --title "dirstat $env:GITHUB_REF_NAME" --notes-file release-notes.md
