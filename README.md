@@ -129,28 +129,23 @@ cargo test --lib readme_screenshots -- --ignored   # writes docs/screenshots/*.p
 
 - **Version numbers** follow [Semantic Versioning](https://semver.org/). The version in `Cargo.toml` is the single source: `rust-dirstat --version` and the window title both show it.
 - **Changelog:** each pull request adds its user-visible changes under **Unreleased** in [CHANGELOG.md](CHANGELOG.md). A release turns those notes into its own section.
-- **Release builds:** the [Build and release](.github/workflows/release.yml) workflow runs on every pull request and every push to `main`:
+- **Builds:** the [Build and release](.github/workflows/release.yml) workflow runs on every pull request and every push to `main`:
   - runs clippy, the tests and a release build;
   - builds the zip and the installer (from [installer/rust-dirstat.iss](installer/rust-dirstat.iss), using a pinned Inno Setup 6);
   - on the runner, installs the latest published release, upgrades it to this build, reinstalls and uninstalls, checking each step;
   - attaches everything to the run as an artifact.
 
-To publish a release:
+**Releases are automatic.** Merging a pull request that changes the app publishes a new release; there's nothing to run by hand. The run on `main`:
 
-1. Run the release script from a clean checkout, with `patch`, `minor`, `major` or an exact version:
+1. picks the version (see [scripts/release-plan.ps1](scripts/release-plan.ps1)):
+   - the next **minor** version (0.2.0 → 0.3.0) when the Unreleased notes have an **Added** section;
+   - otherwise the next **patch** version (0.3.0 → 0.3.1);
+   - or the version in `Cargo.toml`, if a pull request set it higher by hand (for example 1.0.0);
+2. builds and checks that version as above;
+3. commits it to `main` as **Release vX.Y.Z** (`Cargo.toml`, `Cargo.lock`, and the notes moved under a dated heading in the changelog), and tags that commit;
+4. publishes the GitHub release with the installer, the zip, `SHA256SUMS.txt` and the changelog notes.
 
-   ```powershell
-   ./scripts/prepare-release.ps1 minor
-   ```
-
-   It updates `main` and bumps the version in `Cargo.toml` and `Cargo.lock`. It also moves the **Unreleased** notes under a dated heading for the new version, then opens a **Release vX.Y.Z** pull request.
-2. Merge that pull request.
-
-That's all. The run on `main` sees a version with no tag yet. If every check passes, it then:
-- tags the merge commit `vX.Y.Z`;
-- publishes the GitHub release with the installer, the zip, `SHA256SUMS.txt` and that version's changelog notes.
-
-Installed copies then see the new release through the update check. (Pushing a `vX.Y.Z` tag by hand also still publishes a release.)
+Merges that only touch docs, the workflow or scripts are built but not released. A pull request's run summary says what merging it would release. Installed copies see new releases through the update check.
 
 To build the installer locally, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run `ISCC.exe /DAppVersion=X.Y.Z installer\rust-dirstat.iss` after `cargo build --release`. The setup file is written to `dist\`.
 

@@ -1,17 +1,17 @@
 # Builds, tests and packages the Windows binary and installer, and publishes releases.
-#   - Pull requests, pushes to main and manual runs: the zip, setup.exe and checksums are
-#     attached to the run as an artifact.
-#   - Releases: when main has a version (in Cargo.toml) that has no vX.Y.Z tag yet, which is
-#     what merging a "Release vX.Y.Z" PR from scripts/prepare-release.ps1 does, the run also
-#     tags that commit and publishes the GitHub release. The notes come from that version's
-#     CHANGELOG.md section. Pushing a vX.Y.Z tag by hand does the same.
+#   - Every run (pull requests, pushes to main, manual runs): the zip, setup.exe and checksums
+#     are attached to the run as an artifact.
+#   - Releases are automatic: a push to main that changes the app is released as a new version
+#     (scripts/release-plan.ps1 decides what counts and picks the number). The run builds that
+#     version, commits it to main (Cargo.toml, Cargo.lock and the dated CHANGELOG.md section),
+#     tags that commit and publishes the GitHub release. Pushes that only change docs, the
+#     workflow or scripts are built but not released.
 name: Build and release
 
 on:
   pull_request:
   push:
     branches: [main]
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -34,6 +34,8 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # history and tags, to compare with the last release
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -44,36 +46,17 @@ jobs:
       - name: Work out the version
         id: version
         run: |
-          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
-          $release = $false
-          if ($env:GITHUB_REF_TYPE -eq 'tag') {
-            if ($env:GITHUB_REF_NAME -ne "v$version") {
-              throw "Tag $env:GITHUB_REF_NAME does not match the version in Cargo.toml ($version)"
-            }
-            $release = $true
-          } elseif ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF -eq 'refs/heads/main') {
-            # A version on main without a tag yet is a new release.
-            $tag = git ls-remote --tags origin "refs/tags/v$version"
-            if ($LASTEXITCODE -ne 0) { throw "Could not list the tags on origin" }
-            $release = -not $tag
-          }
-          if ($release) {
-            # Release notes: this version's section of CHANGELOG.md.
-            $notes = @(); $found = $false
-            foreach ($line in Get-Content CHANGELOG.md) {
-              if ($line -match '^\[[^\]]+\]: ') { break }  # link definitions at the end
-              if ($line -match '^## \[') {
-                if ($found) { break }
-                $found = $line -match "^## \[$([regex]::Escape($version))\]"
-                continue
-              }
-              if ($found) { $notes += $line }
-            }
-            if (-not $found) { throw "CHANGELOG.md has no section for $version" }
-            $notes -join "`n" | Set-Content release-notes.md -Encoding utf8
-            $label = "v$version"
-          } else {
-            $label = "v$version-dev.$($env:GITHUB_SHA.Substring(0, 7))"
+          # On main, a push that changes the app becomes a release: the script sets the new
+          # version in Cargo.toml and Cargo.lock and dates the CHANGELOG.md notes, so
+          # everything below builds that version.
+          $main = $env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF -eq 'refs/heads/main'
+          $plan = ./scripts/release-plan.ps1 -Apply:$main | Select-Object -Last 1
+          $release = $main -and $plan.Changed
+          $version = if ($release) { $plan.Next } else { $plan.Current }
+          $label = if ($release) { "v$version" } else { "v$version-dev.$($env:GITHUB_SHA.Substring(0, 7))" }
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
+            $summary = if ($plan.Changed) { "Merging this pull request will release **v$($plan.Next)**." } else { "Merging this pull request won't publish a release: it doesn't change the app." }
+            $summary >> $env:GITHUB_STEP_SUMMARY
           }
           "Version $version, label $label, release: $release"
           "version=$version" >> $env:GITHUB_OUTPUT
@@ -186,9 +169,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "v${{ steps.version.outputs.version }}"
-          # On main the tag doesn't exist yet: create it on the commit this run built.
-          $where = if ($env:GITHUB_REF_TYPE -eq 'tag') { @('--verify-tag') } else { @('--target', $env:GITHUB_SHA) }
-          gh release create $tag (Get-ChildItem dist -File).FullName @where `
+          # If something was merged while this run was building, leave the release to the run
+          # for that newer commit: it includes these changes too.
+          git fetch --quiet origin main
+          if ($LASTEXITCODE -ne 0) { throw "git fetch failed" }
+          if ((git rev-parse origin/main) -ne $env:GITHUB_SHA) {
+            "::notice::main moved on while this run was building; the run for the newer commit releases these changes."
+            exit 0
+          }
+          # Record the version on main, then tag that commit and publish the release.
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit --quiet -m "Release $tag" -- Cargo.toml Cargo.lock CHANGELOG.md
+          if ($LASTEXITCODE -ne 0) { throw "git commit failed" }
+          git push --quiet origin HEAD:main
+          if ($LASTEXITCODE -ne 0) { throw "git push failed" }
+          $commit = git rev-parse HEAD
+          gh release create $tag (Get-ChildItem dist -File).FullName --target $commit `
             --title "rust-dirstat $tag" --notes-file release-notes.md
           if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
           "Published https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$tag"
