@@ -12,4 +12,9 @@ pub mod model;
 pub mod platform;
 pub mod scan;
 pub mod treemap;
+pub mod update;
 pub mod util;
+
+/// Name shown to people: window title, welcome screen, installer and Start menu.
+/// (The executable and CLI command stay `dirstat`.)
+pub const APP_NAME: &str = "rust-dirstat";

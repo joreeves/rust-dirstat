@@ -9,7 +9,7 @@ use clap::{Args, Parser, Subcommand};
 use dirstat::cli::{ReportOptions, print_report};
 use dirstat::scan::{self, Cancelled, Method, Progress};
 use dirstat::util::{format_count, format_size};
-use dirstat::{export, gui, platform};
+use dirstat::{export, gui, platform, update};
 
 /// Disk usage analyzer with a cushion treemap (WinDirStat-style). Run without arguments to open
 /// the window.
@@ -31,6 +31,8 @@ enum Command {
     },
     /// Scan a drive or folder and print a report (and optionally export CSV/JSON).
     Scan(ScanArgs),
+    /// Check GitHub for a newer release.
+    CheckUpdate,
 }
 
 #[derive(Args)]
@@ -86,7 +88,28 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some(Command::CheckUpdate) => check_update(),
     }
+}
+
+fn check_update() -> ExitCode {
+    let current = update::Version::current();
+    match update::check() {
+        Ok(update::Outcome::Available(r)) => {
+            println!("{} {} is available (you have {current}).\nDownload it from {}", dirstat::APP_NAME, r.version, r.url);
+        }
+        Ok(update::Outcome::UpToDate(r)) => {
+            println!("{} {current} is up to date (latest release: {}).", dirstat::APP_NAME, r.tag);
+        }
+        Ok(update::Outcome::NoReleases) => {
+            println!("No releases have been published yet ({}).", update::releases_page());
+        }
+        Err(e) => {
+            eprintln!("error: could not check for updates: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 fn run_gui(paths: Vec<PathBuf>, method: Method) -> ExitCode {
@@ -97,7 +120,7 @@ fn run_gui(paths: Vec<PathBuf>, method: Method) -> ExitCode {
             eprintln!("error: {e:#}");
             rfd::MessageDialog::new()
                 .set_level(rfd::MessageLevel::Error)
-                .set_title("dirstat")
+                .set_title(dirstat::APP_NAME)
                 .set_description(format!("{e:#}"))
                 .show();
             ExitCode::FAILURE

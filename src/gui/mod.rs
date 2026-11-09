@@ -19,6 +19,7 @@ use self::actions::{Action, ExportFormat};
 use crate::model::{NodeId, ScanNode, Tree};
 use crate::platform::{self, DriveInfo};
 use crate::scan::{self, Cancelled, Method, Progress};
+use crate::update;
 use crate::util::{format_count, format_size};
 
 /// Opens the main window. If `initial` is not empty, scanning starts right away (several
@@ -26,15 +27,21 @@ use crate::util::{format_count, format_size};
 pub fn run(initial: Vec<PathBuf>, method: Method) -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title(concat!("dirstat ", env!("CARGO_PKG_VERSION")))
+            .with_title(format!("{} {}", crate::APP_NAME, env!("CARGO_PKG_VERSION")))
             .with_inner_size([1280.0, 840.0])
             .with_min_inner_size([720.0, 480.0]),
         ..Default::default()
     };
     eframe::run_native(
-        "dirstat",
+        crate::APP_NAME,
         options,
-        Box::new(move |cc| Ok(Box::new(App::new(cc, initial, method)))),
+        Box::new(move |cc| {
+            let mut app = App::new(cc, initial, method);
+            if !update::disabled() {
+                app.check_for_updates(&cc.egui_ctx);
+            }
+            Ok(Box::new(app))
+        }),
     )
     .map_err(|e| anyhow::anyhow!("could not open the window: {e}"))
 }
@@ -148,6 +155,9 @@ pub struct App {
     jobs_running: usize,
     confirm_delete: Option<NodeId>,
     message: Option<Message>,
+    /// A newer release, once the background update check has found one.
+    update: Option<update::Release>,
+    update_rx: Option<Receiver<update::Release>>,
 }
 
 impl App {
@@ -167,11 +177,29 @@ impl App {
             jobs_running: 0,
             confirm_delete: None,
             message: None,
+            update: None,
+            update_rx: None,
         };
         if !initial.is_empty() {
             app.start_scan(initial, &cc.egui_ctx);
         }
         app
+    }
+
+    /// Asks GitHub for the latest release in the background. Only a newer release is reported;
+    /// failures (offline, proxy, rate limit) are silent.
+    fn check_for_updates(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        let spawned = std::thread::Builder::new().name("update-check".into()).spawn(move || {
+            if let Ok(update::Outcome::Available(release)) = update::check() {
+                let _ = tx.send(release);
+                ctx.request_repaint();
+            }
+        });
+        if spawned.is_ok() {
+            self.update_rx = Some(rx);
+        }
     }
 
     fn info(&mut self, text: impl Into<String>) {
@@ -241,6 +269,16 @@ impl App {
         while let Ok(result) = self.jobs_rx.try_recv() {
             self.jobs_running = self.jobs_running.saturating_sub(1);
             self.finish_job(result);
+        }
+        if let Some(rx) = &self.update_rx {
+            match rx.try_recv() {
+                Ok(release) => {
+                    self.update = Some(release);
+                    self.update_rx = None;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => self.update_rx = None,
+            }
         }
     }
 
@@ -517,6 +555,14 @@ impl App {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(RichText::new(if self.elevated { "Administrator" } else { "Standard user" }).weak());
+                if let Some(release) = &self.update {
+                    ui.separator();
+                    ui.hyperlink_to(RichText::new(format!("⬆ Update available: {}", release.tag)).strong(), &release.url)
+                        .on_hover_text(format!(
+                            "You have {}. Opens the release page, where you can download the installer.",
+                            env!("CARGO_PKG_VERSION")
+                        ));
+                }
                 if let Some(m) = &self.message
                     && m.at.elapsed() < Duration::from_secs(15)
                 {
@@ -555,7 +601,7 @@ impl App {
     fn welcome(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         ui.vertical_centered(|ui| {
             ui.add_space(32.0);
-            ui.label(RichText::new("dirstat").size(34.0).strong());
+            ui.label(RichText::new(crate::APP_NAME).size(34.0).strong());
             ui.label("See where your disk space goes. Select one or more drives and click Scan, or open a folder.");
             ui.add_space(24.0);
             ui.allocate_ui(egui::vec2(600.0, 0.0), |ui| {
