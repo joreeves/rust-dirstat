@@ -26,7 +26,7 @@ use crate::util::{format_count, format_size};
 pub fn run(initial: Vec<PathBuf>, method: Method) -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("dirstat")
+            .with_title(concat!("dirstat ", env!("CARGO_PKG_VERSION")))
             .with_inner_size([1280.0, 840.0])
             .with_min_inner_size([720.0, 480.0]),
         ..Default::default()
@@ -422,26 +422,21 @@ impl App {
                 let config = egui::containers::menu::MenuConfig::new()
                     .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
                 egui::containers::menu::MenuButton::new("💽 Drives").config(config).ui(ui, |ui| {
-                    ui.label(RichText::new("Click a drive to scan it, or tick several and scan them together.").weak());
+                    ui.label(RichText::new("Tick the drives to scan, then click Scan selected drives.").weak());
                     ui.add_space(4.0);
                     for d in &self.drives {
-                        ui.horizontal(|ui| {
-                            let mut ticked = self.selected_drives.contains(&d.root);
-                            if ui.checkbox(&mut ticked, "").on_hover_text("Include in a multi-drive scan").changed() {
-                                actions.push(Action::ToggleDrive(d.root.clone()));
-                            }
-                            let label = format!(
-                                "{}   {} free of {}   {}",
-                                d.root.display(),
-                                format_size(d.free),
-                                format_size(d.total),
-                                d.filesystem
-                            );
-                            if ui.button(label).on_hover_text("Scan only this drive").clicked() {
-                                actions.push(Action::Scan(vec![d.root.clone()]));
-                                ui.close();
-                            }
-                        });
+                        // Clicking the row only (un)ticks it; scans start from the buttons below.
+                        let mut ticked = self.selected_drives.contains(&d.root);
+                        let label = format!(
+                            "{}   {} free of {}   {}",
+                            d.root.display(),
+                            format_size(d.free),
+                            format_size(d.total),
+                            d.filesystem
+                        );
+                        if ui.checkbox(&mut ticked, label).changed() {
+                            actions.push(Action::ToggleDrive(d.root.clone()));
+                        }
                     }
                     ui.separator();
                     if self.multi_drive_buttons(ui, actions) {
@@ -561,21 +556,20 @@ impl App {
         ui.vertical_centered(|ui| {
             ui.add_space(32.0);
             ui.label(RichText::new("dirstat").size(34.0).strong());
-            ui.label("See where your disk space goes. Pick a drive or folder to analyze, or tick several drives.");
+            ui.label("See where your disk space goes. Select one or more drives and click Scan, or open a folder.");
             ui.add_space(24.0);
             ui.allocate_ui(egui::vec2(600.0, 0.0), |ui| {
                 for d in &self.drives {
                     let used = d.total.saturating_sub(d.free);
                     let frac = if d.total == 0 { 0.0 } else { used as f32 / d.total as f32 };
                     ui.horizontal(|ui| {
+                        // The checkbox and the drive button both just (un)select the drive.
                         let mut ticked = self.selected_drives.contains(&d.root);
-                        let tick = ui.checkbox(&mut ticked, "").on_hover_text(format!("Include {} in a multi-drive scan", d.root.display()));
-                        if tick.changed() {
-                            actions.push(Action::ToggleDrive(d.root.clone()));
-                        }
+                        let tick = ui.checkbox(&mut ticked, "");
                         let label = RichText::new(d.root.display().to_string()).size(18.0).strong();
-                        if ui.add_sized([84.0, 40.0], Button::new(label)).on_hover_text("Scan only this drive").clicked() {
-                            actions.push(Action::Scan(vec![d.root.clone()]));
+                        let button = ui.add_sized([84.0, 40.0], Button::new(label).selected(ticked));
+                        if tick.changed() || button.clicked() {
+                            actions.push(Action::ToggleDrive(d.root.clone()));
                         }
                         ui.vertical(|ui| {
                             ui.label(format!(

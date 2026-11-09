@@ -75,6 +75,12 @@ impl TreemapView {
     pub(crate) fn is_current(&self) -> bool {
         self.shown.is_some_and(|k| k.generation == self.generation) && self.pending.is_none()
     }
+
+    /// True once the image on screen is current and rooted at `zoom`.
+    #[cfg(test)]
+    pub(crate) fn is_showing(&self, zoom: NodeId) -> bool {
+        self.is_current() && self.shown.is_some_and(|k| k.zoom == zoom)
+    }
 }
 
 pub fn show(ui: &mut egui::Ui, tree: &Arc<Tree>, view: &mut View, tm: &mut TreemapView, actions: &mut Vec<Action>) {

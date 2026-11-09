@@ -271,7 +271,7 @@ pub fn parse_attribute_list(v: &[u8]) -> Result<Vec<AttrListEntry<'_>>, ParseErr
 
 /// Decodes a UTF-16LE byte slice (lossy for unpaired surrogates).
 pub fn utf16_bytes_to_string(bytes: &[u8]) -> String {
-    let units = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]]));
+    let units = bytes.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c));
     char::decode_utf16(units).map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER)).collect()
 }
 

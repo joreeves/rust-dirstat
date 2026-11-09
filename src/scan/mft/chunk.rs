@@ -148,7 +148,7 @@ fn scan_attributes(
                 if fname.namespace == NAMESPACE_DOS {
                     continue;
                 }
-                let units = fname.name.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]]));
+                let units = fname.name.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c));
                 let duplicate = out.links[links_mark..].iter().any(|l| {
                     l.parent == fname.parent
                         && l.name_len as usize == fname.name.len() / 2
