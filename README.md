@@ -1,15 +1,15 @@
 # rust-dirstat
 
-A WinDirStat-style disk usage analyzer for Windows, written in Rust. Its command is `dirstat`. It scans drives or folders and shows where the space goes in three views:
+A WinDirStat-style disk usage analyzer for Windows, written in Rust. It scans drives or folders and shows where the space goes in three views:
 - a directory tree;
 - a breakdown by file type;
 - a cushion-shaded treemap, where every file is a tile sized by its bytes and colored by its type.
 
-![dirstat showing a drive's folders, file types and treemap](docs/screenshots/main.png)
+![rust-dirstat showing a drive's folders, file types and treemap](docs/screenshots/main.png)
 
 ## Features
 
-- **Fast NTFS scans.** Run as administrator, dirstat reads the drive's Master File Table directly instead of walking folders, so even millions of files take seconds. Without admin rights it uses a parallel folder walk, and the status bar says why.
+- **Fast NTFS scans.** Run as administrator, rust-dirstat reads the drive's Master File Table directly instead of walking folders, so even millions of files take seconds. Without admin rights it uses a parallel folder walk, and the status bar says why.
 - **Several drives at once.** Select drives and scan them together into one combined view.
 - **Linked views.** Clicking a tile selects it in the tree, and the reverse. Double-click a tile to zoom into it. Click a file type to highlight its tiles.
 - **File actions** (right-click): Open, Reveal in Explorer, Copy path, Rescan folder, Move to Recycle Bin.
@@ -27,11 +27,11 @@ A WinDirStat-style disk usage analyzer for Windows, written in Rust. Its command
 From the [Releases](https://github.com/joreeves/rust-dirstat/releases) page, download either of these:
 - **Installer (recommended):** `rust-dirstat-vX.Y.Z-windows-x64-setup.exe`.
   - Installs for your user account only, with no admin prompt. Admins can choose to install for all users.
-  - Adds a Start menu entry and can add `dirstat` to your PATH for terminal use.
+  - Adds a Start menu entry and can add `rust-dirstat` to your PATH for terminal use.
   - Installing a newer version upgrades in place.
   - Uninstall from **Settings > Apps**.
   - Silent install: `setup.exe /VERYSILENT /TASKS="addtopath"`.
-- **Portable zip:** `rust-dirstat-vX.Y.Z-windows-x64.zip`. Unzip it and run `dirstat.exe`.
+- **Portable zip:** `rust-dirstat-vX.Y.Z-windows-x64.zip`. Unzip it and run `rust-dirstat.exe`.
 
 `SHA256SUMS.txt` has checksums for both. The files aren't code-signed, so Windows SmartScreen may warn the first time you run them.
 
@@ -40,12 +40,12 @@ From the [Releases](https://github.com/joreeves/rust-dirstat/releases) page, dow
 When the window opens, rust-dirstat checks for a newer release in the background. If it finds one, the status bar shows **⬆ Update available: vX.Y.Z**; click it to open the release page, then run the new installer.
 - **What it sends:** one request to `api.github.com`, carrying only the app's name and version. It doesn't download or install anything by itself.
 - **When offline:** the check fails silently.
-- **From a terminal:** `dirstat check-update`.
+- **From a terminal:** `rust-dirstat check-update`.
 - **To turn it off:** set the environment variable `DIRSTAT_NO_UPDATE_CHECK=1`.
 
 ## Usage
 
-Run `dirstat.exe` to open the window.
+Run `rust-dirstat.exe` to open the window.
 - **Scan:** select one or more drives (or use **Open folder…**), then click **Scan selected drives**. **Scan all local drives** scans every drive in one go.
 - **Combined view:** several drives appear side by side under one root (`C:\ + D:\`). A drive that can't be scanned is skipped, and the status bar says why.
 - **Rescan** scans the same drives or folder again.
@@ -54,15 +54,15 @@ Run `dirstat.exe` to open the window.
 From a terminal:
 
 ```powershell
-dirstat gui D:\Projects                  # open the window and scan right away
-dirstat gui C:\ D:\                      # several drives/folders in one view
+rust-dirstat gui D:\Projects             # open the window and scan right away
+rust-dirstat gui C:\ D:\                 # several drives/folders in one view
 
-dirstat scan D:\Projects                 # text report
-dirstat scan C:\ D:\ --top 10            # one report covering both drives
-dirstat scan C:\ --depth 2 --files 20 --extensions 10 --stats
-dirstat scan D:\ --csv d.csv --json d.json --json-depth 3
-dirstat check-update                     # is there a newer release?
-dirstat --version
+rust-dirstat scan D:\Projects            # text report
+rust-dirstat scan C:\ D:\ --top 10       # one report covering both drives
+rust-dirstat scan C:\ --depth 2 --files 20 --extensions 10 --stats
+rust-dirstat scan D:\ --csv d.csv --json d.json --json-depth 3
+rust-dirstat check-update                # is there a newer release?
+rust-dirstat --version
 ```
 
 `--method auto|mft|walk`:
@@ -91,10 +91,10 @@ Keys in the tree:
 
 ```powershell
 cargo build --release
-# binary: target\release\dirstat.exe
+# binary: target\release\rust-dirstat.exe
 ```
 
-Requires Rust 1.88+ (edition 2024). dirstat is developed on Windows. The walker, treemap, CLI and GUI also build on other platforms, but the MFT scanner and Explorer integration are Windows-only.
+Requires Rust 1.88+ (edition 2024). rust-dirstat is developed on Windows. The walker, treemap, CLI and GUI also build on other platforms, but the MFT scanner and Explorer integration are Windows-only.
 
 ## Tests
 
@@ -125,7 +125,7 @@ cargo test --lib readme_screenshots -- --ignored   # writes docs/screenshots/*.p
 
 ## Versions and releases
 
-- **Version numbers** follow [Semantic Versioning](https://semver.org/). The version in `Cargo.toml` is the single source: `dirstat --version` and the window title both show it.
+- **Version numbers** follow [Semantic Versioning](https://semver.org/). The version in `Cargo.toml` is the single source: `rust-dirstat --version` and the window title both show it.
 - **Changelog:** every release has a section in [CHANGELOG.md](CHANGELOG.md).
 - **Release builds:** the [Build and release](.github/workflows/release.yml) workflow runs on every pull request:
   - runs clippy, the tests and a release build;
@@ -141,7 +141,7 @@ To publish a release:
 
    ```powershell
    git switch main; git pull
-   git tag -a vX.Y.Z -m "dirstat X.Y.Z"
+   git tag -a vX.Y.Z -m "rust-dirstat X.Y.Z"
    git push origin vX.Y.Z
    ```
 

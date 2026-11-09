@@ -7,7 +7,7 @@
 ; The installer:
 ;   - installs for the current user without an admin prompt (admins can pick "all users");
 ;   - adds a Start menu shortcut and, optionally, a desktop shortcut;
-;   - can add the install folder to PATH so `dirstat scan ...` works in a terminal;
+;   - can add the install folder to PATH so `rust-dirstat scan ...` works in a terminal;
 ;   - upgrades an existing installation in place (closing a running copy first);
 ;   - registers an uninstaller under Settings > Apps.
 ; Silent install: setup.exe /VERYSILENT [/TASKS="addtopath,desktopicon"] [/ALLUSERS]
@@ -26,7 +26,7 @@
 #endif
 
 #define AppName "rust-dirstat"
-#define AppExe "dirstat.exe"
+#define AppExe "rust-dirstat.exe"
 #define AppUrl "https://github.com/joreeves/rust-dirstat"
 
 [Setup]
@@ -62,8 +62,12 @@ RestartApplications=no
 ChangesEnvironment=yes
 
 [Tasks]
-Name: "addtopath"; Description: "Add to PATH, so ""dirstat"" works in a terminal"; GroupDescription: "Command line:"
+Name: "addtopath"; Description: "Add to PATH, so ""rust-dirstat"" works in a terminal"; GroupDescription: "Command line:"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+
+[InstallDelete]
+; 0.1.0 installed the executable as dirstat.exe.
+Type: files; Name: "{app}\dirstat.exe"
 
 [Files]
 Source: "{#SourceDir}\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion

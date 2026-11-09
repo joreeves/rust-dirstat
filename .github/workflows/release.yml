@@ -104,7 +104,7 @@ jobs:
           $name = "rust-dirstat-${{ steps.version.outputs.label }}-windows-x64"
           # Portable zip.
           New-Item -ItemType Directory -Force dist/$name | Out-Null
-          Copy-Item target/release/dirstat.exe, README.md, CHANGELOG.md, LICENSE dist/$name
+          Copy-Item target/release/rust-dirstat.exe, README.md, CHANGELOG.md, LICENSE dist/$name
           Compress-Archive -Path dist/$name/* -DestinationPath dist/$name.zip
           Remove-Item -Recurse dist/$name
           # Installer.
@@ -118,24 +118,35 @@ jobs:
           "name=$name" >> $env:GITHUB_OUTPUT
 
       - name: Test the installer
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $setup = "dist/${{ steps.package.outputs.name }}-setup.exe"
           $dir = Join-Path $env:LOCALAPPDATA 'Programs\rust-dirstat'
-          $exe = Join-Path $dir 'dirstat.exe'
+          $exe = Join-Path $dir 'rust-dirstat.exe'
           $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'rust-dirstat.lnk'
-          function Install {
-            $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', '/TASKS=addtopath' -Wait -PassThru
-            if ($p.ExitCode -ne 0) { throw "setup exited with $($p.ExitCode)" }
+          function Install($installer) {
+            $p = Start-Process $installer -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', '/TASKS=addtopath' -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "$installer exited with $($p.ExitCode)" }
           }
           function PathEntries { @([Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_.TrimEnd('\') -ieq $dir }).Count }
 
-          Install
+          # Upgrade test: install the latest published release first, if there is one.
+          $previous = "$env:RUNNER_TEMP\previous-release"
+          gh release download --repo $env:GITHUB_REPOSITORY --pattern '*-setup.exe' --dir $previous --clobber
+          $old = Get-ChildItem $previous -Filter '*-setup.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($old) { "Installing the previous release: $($old.Name)"; Install $old.FullName } else { "No previous release to upgrade from." }
+
+          Install $setup
           $out = & $exe --version
-          if ($out -ne "dirstat ${{ steps.version.outputs.version }}") { throw "unexpected --version output: $out" }
+          if ($out -ne "rust-dirstat ${{ steps.version.outputs.version }}") { throw "unexpected --version output: $out" }
+          if (Test-Path (Join-Path $dir 'dirstat.exe')) { throw "upgrade left the old dirstat.exe behind" }
           if (-not (Test-Path $shortcut)) { throw "no Start menu shortcut at $shortcut" }
+          $target = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut).TargetPath
+          if ($target -ine $exe) { throw "Start menu shortcut points to $target" }
           if ((PathEntries) -ne 1) { throw "install folder is not on the user PATH once" }
 
-          Install  # upgrade in place
+          Install $setup  # reinstall over the top
           if ((PathEntries) -ne 1) { throw "reinstall changed the PATH entry count to $(PathEntries)" }
 
           # The uninstaller hands off to a copy of itself and returns early, so wait for it.
@@ -147,6 +158,7 @@ jobs:
           if (Test-Path $shortcut) { throw "uninstall left the Start menu shortcut" }
           if ((PathEntries) -ne 0) { throw "uninstall left the PATH entry" }
           "Install, upgrade and uninstall all worked."
+          exit 0  # the release download above may have set a non-zero exit code
 
       - uses: actions/upload-artifact@v7
         with:

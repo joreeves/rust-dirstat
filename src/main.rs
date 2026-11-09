@@ -14,7 +14,7 @@ use dirstat::{export, gui, platform, update};
 /// Disk usage analyzer with a cushion treemap (WinDirStat-style). Run without arguments to open
 /// the window.
 #[derive(Parser)]
-#[command(name = "dirstat", version)]
+#[command(name = "rust-dirstat", version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

@@ -900,27 +900,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dirstat"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "csv",
- "eframe",
- "egui_extras",
- "egui_kittest",
- "egui_system_font_provider",
- "rayon",
- "rfd",
- "serde",
- "serde_json",
- "tempfile",
- "trash",
- "ureq",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "dispatch"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3245,6 +3224,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9da7f59328b09405b181fee1018925fad50f157afb43c0c0f5c522c256dd5907"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "rust-dirstat"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "csv",
+ "eframe",
+ "egui_extras",
+ "egui_kittest",
+ "egui_system_font_provider",
+ "rayon",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "trash",
+ "ureq",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

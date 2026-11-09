@@ -424,7 +424,7 @@ impl App {
         let Some(path) = rfd::FileDialog::new()
             .set_title(format!("Export {label}"))
             .add_filter(label, &[ext])
-            .set_file_name(format!("dirstat.{ext}"))
+            .set_file_name(format!("{}.{ext}", crate::APP_NAME))
             .save_file()
         else {
             return;

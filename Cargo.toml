@@ -1,15 +1,17 @@
 [package]
-name = "dirstat"
+name = "rust-dirstat"
 version = "0.1.0"
 edition = "2024"
 description = "WinDirStat-style disk usage analyzer with a cushion treemap and a fast NTFS MFT scanner"
 license = "MIT"
 
+# The library keeps the short name, so code and tests use `dirstat::...`.
 [lib]
+name = "dirstat"
 path = "src/lib.rs"
 
 [[bin]]
-name = "dirstat"
+name = "rust-dirstat"
 path = "src/main.rs"
 
 [dependencies]

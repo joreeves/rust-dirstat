@@ -1,4 +1,4 @@
-//! Headless text report for `dirstat scan`.
+//! Headless text report for `rust-dirstat scan`.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
