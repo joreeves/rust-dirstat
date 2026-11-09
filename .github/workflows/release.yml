@@ -94,7 +94,7 @@ jobs:
           $name = "rust-dirstat-${{ steps.version.outputs.label }}-windows-x64"
           # Portable zip.
           New-Item -ItemType Directory -Force dist/$name | Out-Null
-          Copy-Item target/release/dirstat.exe, README.md, CHANGELOG.md dist/$name
+          Copy-Item target/release/dirstat.exe, README.md, CHANGELOG.md, LICENSE dist/$name
           Compress-Archive -Path dist/$name/* -DestinationPath dist/$name.zip
           Remove-Item -Recurse dist/$name
           # Installer.

@@ -166,3 +166,7 @@ To build the installer locally, install [Inno Setup 6](https://jrsoftware.org/is
 | `src/export.rs`, `src/cli.rs` | CSV/JSON writers and the text report |
 | `src/update.rs` | Update check against the latest GitHub release |
 | `installer/rust-dirstat.iss` | Inno Setup script for the installer |
+
+## License
+
+[MIT](LICENSE)
