@@ -11,6 +11,8 @@
 ;   - upgrades an existing installation in place (closing a running copy first);
 ;   - registers an uninstaller under Settings > Apps.
 ; Silent install: setup.exe /VERYSILENT [/TASKS="addtopath,desktopicon"] [/ALLUSERS]
+; The app's own updater runs: setup.exe /SILENT /SUPPRESSMSGBOXES /NORESTART /relaunch=1
+; (an upgrade that keeps the previous options and starts rust-dirstat again at the end).
 
 #ifndef AppVersion
   #error Pass the version, e.g. /DAppVersion=0.1.0
@@ -80,8 +82,16 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+; After an update started from the app: open it again (as the user, not elevated).
+Filename: "{app}\{#AppExe}"; Flags: nowait runasoriginaluser; Check: RelaunchRequested
 
 [Code]
+// /relaunch=1 on the command line, as passed by the app's updater.
+function RelaunchRequested: Boolean;
+begin
+  Result := ExpandConstant('{param:relaunch|0}') = '1';
+end;
+
 // PATH entry: the user's PATH for a per-user install, the system PATH for an all-users install.
 
 function EnvRoot: Integer;

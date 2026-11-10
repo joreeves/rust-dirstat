@@ -6,6 +6,13 @@ All notable changes to rust-dirstat are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Updates install themselves. When a newer release is out, a copy installed with setup.exe
+  shows **Update to vX.Y.Z** in the status bar. Clicking it downloads the installer, closes
+  the app, upgrades it (keeping your options) and opens it again. `rust-dirstat update` does
+  the same from a terminal. Portable copies still link to the release page.
+
 ## [0.3.0] - 2026-11-09
 
 ### Added

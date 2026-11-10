@@ -10,7 +10,8 @@ mod treemap_view;
 use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Button, Color32, ProgressBar, RichText};
@@ -209,6 +210,19 @@ pub struct App {
     /// A newer release, once the background update check has found one.
     update: Option<update::Release>,
     update_rx: Option<Receiver<update::Release>>,
+    /// Whether this copy came from the installer, so an update can upgrade it in place.
+    installed: bool,
+    /// Downloading the update's installer.
+    updating: Option<UpdateJob>,
+    /// Why the last update attempt failed.
+    update_error: Option<String>,
+}
+
+struct UpdateJob {
+    received: Arc<AtomicU64>,
+    total: u64,
+    /// `Ok` once the installer has started (the app then closes).
+    rx: Receiver<Result<(), String>>,
 }
 
 impl App {
@@ -230,6 +244,9 @@ impl App {
             message: None,
             update: None,
             update_rx: None,
+            installed: update::installed_copy(),
+            updating: None,
+            update_error: None,
         };
         if !initial.is_empty() {
             app.start_scan(initial, &cc.egui_ctx);
@@ -250,6 +267,31 @@ impl App {
         });
         if spawned.is_ok() {
             self.update_rx = Some(rx);
+        }
+    }
+
+    /// Downloads the new release's installer in the background, then starts it. The installer
+    /// upgrades this copy and opens it again; [`Self::poll`] closes the window once it has started.
+    fn start_update(&mut self, ctx: &egui::Context) {
+        let Some(asset) = self.update.as_ref().and_then(|r| r.installer.clone()) else { return };
+        if self.updating.is_some() {
+            return;
+        }
+        let received = Arc::new(AtomicU64::new(0));
+        let (tx, rx) = mpsc::channel();
+        let (thread_received, ctx2) = (received.clone(), ctx.clone());
+        let total = asset.size;
+        let spawned = std::thread::Builder::new().name("update".into()).spawn(move || {
+            let result = update::download(&asset, &thread_received).and_then(|path| update::run_installer(&path, true));
+            let _ = tx.send(result.map_err(|e| format!("{e:#}")));
+            ctx2.request_repaint();
+        });
+        match spawned {
+            Ok(_) => {
+                self.update_error = None;
+                self.updating = Some(UpdateJob { received, total, rx });
+            }
+            Err(e) => self.update_error = Some(e.to_string()),
         }
     }
 
@@ -299,7 +341,25 @@ impl App {
         self.info(text);
     }
 
-    fn poll(&mut self) {
+    fn poll(&mut self, ctx: &egui::Context) {
+        if let Some(job) = &self.updating {
+            match job.rx.try_recv() {
+                Ok(Ok(())) => {
+                    // The installer is running: get out of its way.
+                    self.updating = None;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                Ok(Err(e)) => {
+                    self.updating = None;
+                    self.update_error = Some(e);
+                }
+                Err(TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(100)),
+                Err(TryRecvError::Disconnected) => {
+                    self.updating = None;
+                    self.update_error = Some("the update stopped unexpectedly".into());
+                }
+            }
+        }
         if let Some(job) = &self.scan {
             match job.rx.try_recv() {
                 Ok(result) => {
@@ -397,6 +457,7 @@ impl App {
                 }
             }
             Action::SetMethod(m) => self.method = m,
+            Action::InstallUpdate => self.start_update(ctx),
             Action::Elevate => {
                 let mut args = vec!["gui".to_string()];
                 if let Some(l) = &self.loaded {
@@ -581,7 +642,42 @@ impl App {
         });
     }
 
-    fn status_bar(&self, ui: &mut egui::Ui) {
+    /// The newer release in the status bar (laid out right to left). An installed copy can
+    /// update itself; a portable one links to the release page.
+    fn update_notice(&self, ui: &mut egui::Ui, release: &update::Release, actions: &mut Vec<Action>) {
+        let current = env!("CARGO_PKG_VERSION");
+        if let Some(job) = &self.updating {
+            let done = job.received.load(Ordering::Relaxed);
+            let percent = (done * 100).checked_div(job.total).unwrap_or(0);
+            ui.label(format!("⬇ Downloading {}… {percent}%", release.tag));
+            return;
+        }
+        match &release.installer {
+            Some(installer) if self.installed => {
+                ui.hyperlink_to("What's new", &release.url);
+                let label = if self.update_error.is_some() { "Try again" } else { "⬆ Update" };
+                let button = ui.button(RichText::new(format!("{label} to {}", release.tag)).strong()).on_hover_text(format!(
+                    "You have {current}. Downloads the installer ({}), closes {}, installs {} and opens it again.",
+                    format_size(installer.size),
+                    crate::APP_NAME,
+                    release.tag
+                ));
+                if button.clicked() {
+                    actions.push(Action::InstallUpdate);
+                }
+                if let Some(e) = &self.update_error {
+                    ui.label(RichText::new(format!("Update failed: {e}")).color(Color32::from_rgb(235, 90, 70)));
+                }
+            }
+            _ => {
+                let why = if self.installed { "This release has no installer" } else { "This copy wasn't installed with the installer" };
+                ui.hyperlink_to(RichText::new(format!("⬆ Update available: {}", release.tag)).strong(), &release.url)
+                    .on_hover_text(format!("You have {current}. {why}, so download the new version from the release page."));
+            }
+        }
+    }
+
+    fn status_bar(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         ui.horizontal(|ui| {
             if let Some(l) = &self.loaded {
                 let t = &l.tree;
@@ -608,11 +704,7 @@ impl App {
                 ui.label(RichText::new(if self.elevated { "Administrator" } else { "Standard user" }).weak());
                 if let Some(release) = &self.update {
                     ui.separator();
-                    ui.hyperlink_to(RichText::new(format!("⬆ Update available: {}", release.tag)).strong(), &release.url)
-                        .on_hover_text(format!(
-                            "You have {}. Opens the release page, where you can download the installer.",
-                            env!("CARGO_PKG_VERSION")
-                        ));
+                    self.update_notice(ui, release, actions);
                 }
                 if let Some(m) = &self.message
                     && m.at.elapsed() < Duration::from_secs(15)
@@ -791,14 +883,14 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.poll();
+        self.poll(&ctx);
         let mut actions = Vec::new();
 
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.add_space(2.0);
             self.toolbar(ui, &mut actions);
         });
-        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui, &mut actions));
 
         if let Some(job) = &self.scan {
             egui::CentralPanel::default().show(ui, |ui| scanning_ui(ui, job, &mut actions));
