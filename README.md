@@ -39,11 +39,15 @@ From the [Releases](https://github.com/joreeves/rust-dirstat/releases) page, dow
 
 ### Updates
 
-When the window opens, rust-dirstat checks for a newer release in the background. If it finds one, the status bar shows **⬆ Update available: vX.Y.Z**; click it to open the release page, then run the new installer.
-- **What it sends:** one request to `api.github.com`, carrying only the app's name and version. It doesn't download or install anything by itself.
+When the window opens, rust-dirstat checks for a newer release in the background. If it finds one, the status bar says so:
+- **Installed with setup.exe:** click **⬆ Update to vX.Y.Z**. The app downloads the new installer and closes. The installer then upgrades in place, keeping your options (such as the PATH entry), and opens the app again. **What's new** opens the release notes.
+- **Portable copy (from the zip):** **⬆ Update available: vX.Y.Z** opens the release page, where you download the new version.
+
+Also:
+- **What the check sends:** one request to `api.github.com`, carrying only the app's name and version. Nothing is downloaded until you click **Update**.
 - **When offline:** the check fails silently.
-- **From a terminal:** `rust-dirstat check-update`.
-- **To turn it off:** set the environment variable `DIRSTAT_NO_UPDATE_CHECK=1`.
+- **From a terminal:** `rust-dirstat check-update` checks; `rust-dirstat update` downloads and runs the installer.
+- **To turn the check off:** set the environment variable `DIRSTAT_NO_UPDATE_CHECK=1`.
 
 ## Usage
 
@@ -64,6 +68,7 @@ rust-dirstat scan C:\ D:\ --top 10       # one report covering both drives
 rust-dirstat scan C:\ --depth 2 --files 20 --extensions 10 --stats
 rust-dirstat scan D:\ --csv d.csv --json d.json --json-depth 3
 rust-dirstat check-update                # is there a newer release?
+rust-dirstat update                      # install it (copies installed with setup.exe)
 rust-dirstat --version
 ```
 
@@ -159,7 +164,7 @@ To build the installer locally, install [Inno Setup 6](https://jrsoftware.org/is
 | `src/treemap/` | Squarified layout and van Wijk cushion shading into an RGBA buffer |
 | `src/gui/` | eframe app; the treemap is rendered on a background thread and uploaded as a texture |
 | `src/export.rs`, `src/cli.rs` | CSV/JSON writers and the text report |
-| `src/update.rs` | Update check against the latest GitHub release |
+| `src/update.rs` | Update check against the latest GitHub release; downloads and starts its installer |
 | `installer/rust-dirstat.iss` | Inno Setup script for the installer |
 | `assets/` | App icon: `icon.svg` (with `icon-small.svg` for 16–24 px) is the source; `rust-dirstat.ico` and `icon-256.png` are generated from it by `cargo run --example make_icon` |
 | `build.rs` | Embeds the icon and version details in `rust-dirstat.exe` |

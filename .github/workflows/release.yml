@@ -145,6 +145,19 @@ jobs:
 
           Install $setup  # reinstall over the top
           if ((PathEntries) -ne 1) { throw "reinstall changed the PATH entry count to $(PathEntries)" }
+          if (Get-Process rust-dirstat -ErrorAction SilentlyContinue) { throw "a silent install started the app" }
+
+          # The app's updater: a silent upgrade that keeps the previous options and starts the
+          # app again (/relaunch=1).
+          $p = Start-Process $setup -ArgumentList '/SILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/relaunch=1' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "the updater's install exited with $($p.ExitCode)" }
+          if ((PathEntries) -ne 1) { throw "the updater's install changed the PATH entry count to $(PathEntries)" }
+          $deadline = (Get-Date).AddSeconds(30)
+          while (-not ($app = Get-Process rust-dirstat -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
+          if (-not $app) { throw "/relaunch=1 did not start the app again" }
+          if (@($app)[0].Path -ine $exe) { throw "the app was started from $(@($app)[0].Path)" }
+          $app | Stop-Process -Force
+          Start-Sleep -Seconds 2
 
           # The uninstaller hands off to a copy of itself and returns early, so wait for it.
           Start-Process (Join-Path $dir 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait

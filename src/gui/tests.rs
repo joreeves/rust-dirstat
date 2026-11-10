@@ -202,11 +202,42 @@ fn update_notice_appears_when_a_newer_release_is_found() {
     h.run_steps(2);
     assert!(h.query_by_label_contains("Update available").is_none(), "nothing until the check answers");
     let url = "https://github.com/joreeves/rust-dirstat/releases/tag/v9.0.0";
-    tx.send(update::Release { version: update::Version(9, 0, 0), tag: "v9.0.0".into(), url: url.into() }).unwrap();
+    tx.send(update::Release { version: update::Version(9, 0, 0), tag: "v9.0.0".into(), url: url.into(), installer: None }).unwrap();
     h.run_steps(2);
+    // Tests run from target\, not an installed copy: the notice links to the release page.
     h.get_by_label("⬆ Update available: v9.0.0");
     assert!(h.state().update_rx.is_none());
     assert_eq!(h.state().update.as_ref().map(|r| r.url.as_str()), Some(url));
+}
+
+#[test]
+fn an_installed_copy_offers_to_update_itself() {
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_eframe(|cc| App::new(cc, Vec::new(), Method::Walk));
+    h.state_mut().installed = true;
+    // Nothing listens on port 9 here, so the download fails straight away (tests never download).
+    let installer = update::Asset {
+        name: "rust-dirstat-v9.0.0-windows-x64-setup.exe".into(),
+        url: "http://127.0.0.1:9/setup.exe".into(),
+        size: 1000,
+    };
+    let url = "https://github.com/joreeves/rust-dirstat/releases/tag/v9.0.0";
+    h.state_mut().update =
+        Some(update::Release { version: update::Version(9, 0, 0), tag: "v9.0.0".into(), url: url.into(), installer: Some(installer) });
+    h.run_steps(2);
+    h.get_by_label("What's new");
+    h.get_by_label("⬆ Update to v9.0.0").click();
+    h.step();
+    assert!(h.state().updating.is_some(), "the download started");
+    wait(&mut h, "the download to fail", |app| app.update_error.is_some());
+    h.run_steps(2);
+    assert!(h.state().updating.is_none());
+    h.get_by_label_contains("Update failed: could not reach GitHub");
+    h.get_by_label("Try again to v9.0.0");
 }
 
 #[test]

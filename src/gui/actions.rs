@@ -24,6 +24,8 @@ pub enum Action {
     CancelScan,
     SetMethod(Method),
     Elevate,
+    /// Download and install the newer release, then reopen.
+    InstallUpdate,
     /// Select a node; `reveal` expands its ancestors and scrolls the tree to it.
     Select { id: NodeId, reveal: bool },
     Toggle(NodeId),

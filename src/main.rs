@@ -2,7 +2,7 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
@@ -33,6 +33,8 @@ enum Command {
     Scan(ScanArgs),
     /// Check GitHub for a newer release.
     CheckUpdate,
+    /// Download and install the newest release (for copies installed with the installer).
+    Update,
 }
 
 #[derive(Args)]
@@ -89,6 +91,7 @@ fn main() -> ExitCode {
             }
         },
         Some(Command::CheckUpdate) => check_update(),
+        Some(Command::Update) => install_update(),
     }
 }
 
@@ -96,7 +99,12 @@ fn check_update() -> ExitCode {
     let current = update::Version::current();
     match update::check() {
         Ok(update::Outcome::Available(r)) => {
-            println!("{} {} is available (you have {current}).\nDownload it from {}", dirstat::APP_NAME, r.version, r.url);
+            println!("{} {} is available (you have {current}).", dirstat::APP_NAME, r.version);
+            if r.installer.is_some() && update::installed_copy() {
+                println!("Run `{} update` to install it, or see {}", dirstat::APP_NAME, r.url);
+            } else {
+                println!("Download it from {}", r.url);
+            }
         }
         Ok(update::Outcome::UpToDate(r)) => {
             println!("{} {current} is up to date (latest release: {}).", dirstat::APP_NAME, r.tag);
@@ -110,6 +118,62 @@ fn check_update() -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+/// Downloads the newest release's installer and starts it; the installer then replaces this copy.
+fn install_update() -> ExitCode {
+    let name = dirstat::APP_NAME;
+    let current = update::Version::current();
+    let release = match update::check() {
+        Ok(update::Outcome::Available(r)) => r,
+        Ok(update::Outcome::UpToDate(_)) => {
+            println!("{name} {current} is up to date.");
+            return ExitCode::SUCCESS;
+        }
+        Ok(update::Outcome::NoReleases) => {
+            println!("No releases have been published yet ({}).", update::releases_page());
+            return ExitCode::SUCCESS;
+        }
+        Err(e) => {
+            eprintln!("error: could not check for updates: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let installer = match &release.installer {
+        Some(installer) if update::installed_copy() => installer,
+        _ => {
+            println!("{name} {} is available (you have {current}).", release.version);
+            println!("This copy wasn't installed with the installer: download the new version from {}", release.url);
+            return ExitCode::FAILURE;
+        }
+    };
+    let received = AtomicU64::new(0);
+    let downloaded = std::thread::scope(|s| {
+        let job = s.spawn(|| update::download(installer, &received));
+        let show = std::io::stderr().is_terminal();
+        while !job.is_finished() {
+            if show {
+                let percent = received.load(Ordering::Relaxed) * 100 / installer.size.max(1);
+                eprint!("\rDownloading {name} {} ({})... {percent}%", release.version, format_size(installer.size));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if show {
+            eprintln!();
+        }
+        job.join().expect("download thread")
+    });
+    let started = downloaded.and_then(|path| update::run_installer(&path, false));
+    match started {
+        Ok(()) => {
+            println!("Installing {name} {}: the installer shows its progress and closes when it's done.", release.version);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: could not update: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn run_gui(paths: Vec<PathBuf>, method: Method) -> ExitCode {
