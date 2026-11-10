@@ -29,6 +29,7 @@ env:
 jobs:
   windows:
     runs-on: windows-latest
+    timeout-minutes: 30  # a full run takes about 10; don't let a hang hold the runner for hours
     defaults:
       run:
         shell: pwsh
@@ -148,8 +149,11 @@ jobs:
           if (Get-Process rust-dirstat -ErrorAction SilentlyContinue) { throw "a silent install started the app" }
 
           # The app's updater: a silent upgrade that keeps the previous options and starts the
-          # app again (/relaunch=1).
-          $p = Start-Process $setup -ArgumentList '/SILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/relaunch=1' -Wait -PassThru
+          # app again (/relaunch=1). Wait for setup itself only: Start-Process -Wait would also
+          # wait for the app it starts, which keeps running.
+          $p = Start-Process $setup -ArgumentList '/SILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/relaunch=1' -PassThru
+          $null = $p.Handle  # keeps the exit code readable after it exits
+          if (-not $p.WaitForExit(300000)) { throw "the updater's install did not finish within 5 minutes" }
           if ($p.ExitCode -ne 0) { throw "the updater's install exited with $($p.ExitCode)" }
           if ((PathEntries) -ne 1) { throw "the updater's install changed the PATH entry count to $(PathEntries)" }
           $deadline = (Get-Date).AddSeconds(30)
