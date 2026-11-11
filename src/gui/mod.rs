@@ -1,6 +1,7 @@
 //! egui front end: drive picker, scan progress, directory tree, file types and treemap.
 
 mod actions;
+mod diff_view;
 mod ext_view;
 #[cfg(test)]
 mod tests;
@@ -8,15 +9,17 @@ mod tree_view;
 mod treemap_view;
 
 use std::collections::{BTreeSet, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Button, Color32, ProgressBar, RichText};
 
 use self::actions::{Action, ExportFormat};
+use self::treemap_view::Source;
+use crate::diff::{self, Diff, Side};
 use crate::model::{NodeId, ScanNode, Tree};
 use crate::platform::{self, DriveInfo};
 use crate::scan::{self, Cancelled, Method, Progress};
@@ -24,8 +27,9 @@ use crate::update;
 use crate::util::{format_count, format_size};
 
 /// Opens the main window. If `initial` is not empty, scanning starts right away (several
-/// locations are combined into one view).
-pub fn run(initial: Vec<PathBuf>, method: Method) -> anyhow::Result<()> {
+/// locations are combined into one view). With `compare`, the two `initial` locations are
+/// compared instead.
+pub fn run(initial: Vec<PathBuf>, compare: bool, method: Method) -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(format!("{} {}", crate::APP_NAME, env!("CARGO_PKG_VERSION")))
@@ -51,7 +55,15 @@ pub fn run(initial: Vec<PathBuf>, method: Method) -> anyhow::Result<()> {
         crate::APP_NAME,
         options,
         Box::new(move |cc| {
-            let mut app = App::new(cc, initial, method);
+            let mut app = if compare {
+                let mut app = App::new(cc, Vec::new(), method);
+                if let Ok(pair) = <[PathBuf; 2]>::try_from(initial) {
+                    app.start_compare(pair, &cc.egui_ctx);
+                }
+                app
+            } else {
+                App::new(cc, initial, method)
+            };
             if !update::disabled() {
                 app.check_for_updates(&cc.egui_ctx);
             }
@@ -149,12 +161,18 @@ impl View {
     }
 
     pub fn rebuild_rows(&mut self, tree: &Tree) {
+        self.rebuild_rows_where(tree, |_| true);
+    }
+
+    /// Like [`Self::rebuild_rows`], listing only the children `keep` accepts (the root is
+    /// always listed).
+    pub fn rebuild_rows_where(&mut self, tree: &Tree, keep: impl Fn(NodeId) -> bool) {
         self.rows.clear();
         let mut stack = vec![(tree.root(), 0u16)];
         while let Some((id, depth)) = stack.pop() {
             self.rows.push((id, depth));
             if self.expanded.contains(&id) {
-                stack.extend(tree.node(id).children.iter().rev().map(|&c| (c, depth + 1)));
+                stack.extend(tree.node(id).children.iter().rev().filter(|&&c| keep(c)).map(|&c| (c, depth + 1)));
             }
         }
         self.rows_dirty = false;
@@ -187,6 +205,52 @@ struct Loaded {
     targets: Vec<PathBuf>,
 }
 
+/// A comparison on screen.
+struct Compared {
+    diff: Arc<Diff>,
+    view: View,
+    /// The two locations as chosen (used by Rescan).
+    paths: [PathBuf; 2],
+    show_identical: bool,
+}
+
+/// Scanning two locations at once, then matching them.
+struct CompareJob {
+    paths: [PathBuf; 2],
+    progress: [Arc<Progress>; 2],
+    /// Set once both scans are done and the trees are being matched.
+    matching: Arc<AtomicBool>,
+    rx: Receiver<anyhow::Result<Diff>>,
+    started: Instant,
+}
+
+/// The fields of the Compare dialog.
+struct CompareDialog {
+    left: String,
+    right: String,
+}
+
+impl CompareDialog {
+    /// The two locations, or why they can't be compared yet.
+    fn paths(&self) -> Result<[PathBuf; 2], &'static str> {
+        let (left, right) = (self.left.trim(), self.right.trim());
+        if left.is_empty() || right.is_empty() {
+            return Err("Choose a drive or folder for both sides.");
+        }
+        if !Path::new(left).is_dir() {
+            return Err("The left location isn't a drive or folder.");
+        }
+        if !Path::new(right).is_dir() {
+            return Err("The right location isn't a drive or folder.");
+        }
+        let (l, r) = (scan::normalize_root(Path::new(left)), scan::normalize_root(Path::new(right)));
+        if l.to_string_lossy().to_lowercase() == r.to_string_lossy().to_lowercase() {
+            return Err("Choose two different locations.");
+        }
+        Ok([PathBuf::from(left), PathBuf::from(right)])
+    }
+}
+
 struct Message {
     text: String,
     error: bool,
@@ -201,6 +265,10 @@ pub struct App {
     selected_drives: BTreeSet<PathBuf>,
     scan: Option<ScanJob>,
     loaded: Option<Loaded>,
+    compare_job: Option<CompareJob>,
+    /// Shown instead of `loaded` after comparing two locations.
+    compared: Option<Compared>,
+    compare_dialog: Option<CompareDialog>,
     treemap: treemap_view::TreemapView,
     jobs_tx: Sender<JobResult>,
     jobs_rx: Receiver<JobResult>,
@@ -236,6 +304,9 @@ impl App {
             selected_drives: BTreeSet::new(),
             scan: None,
             loaded: None,
+            compare_job: None,
+            compared: None,
+            compare_dialog: None,
             treemap: treemap_view::TreemapView::default(),
             jobs_tx,
             jobs_rx,
@@ -303,11 +374,26 @@ impl App {
         self.message = Some(Message { text: text.into(), error: true, at: Instant::now() });
     }
 
+    /// A scan or comparison is running.
+    fn busy(&self) -> bool {
+        self.scan.is_some() || self.compare_job.is_some()
+    }
+
+    /// The tree on screen and its view state (a scan or a comparison).
+    fn current(&self) -> Option<(&Tree, &View)> {
+        if let Some(l) = &self.loaded {
+            return Some((&l.tree, &l.view));
+        }
+        self.compared.as_ref().map(|c| (&c.diff.tree, &c.view))
+    }
+
     fn start_scan(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
-        if self.scan.is_some() || paths.is_empty() {
+        if self.busy() || paths.is_empty() {
             return;
         }
-        self.loaded = None; // free the old tree before building a new one
+        // Free the old tree before building a new one.
+        self.loaded = None;
+        self.compared = None;
         self.treemap.reset();
         self.confirm_delete = None;
         let progress = Arc::new(Progress::new());
@@ -322,6 +408,78 @@ impl App {
             })
             .expect("failed to spawn scan thread");
         self.scan = Some(ScanJob { paths, progress, rx, started: Instant::now() });
+    }
+
+    /// Scans both locations in the background and compares them.
+    fn start_compare(&mut self, paths: [PathBuf; 2], ctx: &egui::Context) {
+        if self.busy() {
+            return;
+        }
+        self.loaded = None;
+        self.compared = None;
+        self.treemap.reset();
+        self.confirm_delete = None;
+        self.compare_dialog = None;
+        let progress = [Arc::new(Progress::new()), Arc::new(Progress::new())];
+        let matching = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        let (thread_progress, thread_paths, thread_matching) = (progress.clone(), paths.clone(), matching.clone());
+        let (method, ctx2) = (self.method, ctx.clone());
+        std::thread::Builder::new()
+            .name("compare".into())
+            .spawn(move || {
+                let start = Instant::now();
+                let [p0, p1] = &thread_progress;
+                let result = diff::scan_both([&thread_paths[0], &thread_paths[1]], method, [p0, p1]).map(|[left, right]| {
+                    thread_matching.store(true, Ordering::Relaxed);
+                    ctx2.request_repaint();
+                    let mut diff = Diff::new(&left, &right);
+                    diff.elapsed = start.elapsed();
+                    diff
+                });
+                let _ = tx.send(result);
+                ctx2.request_repaint();
+            })
+            .expect("failed to spawn compare thread");
+        self.compare_job = Some(CompareJob { paths, progress, matching, rx, started: Instant::now() });
+    }
+
+    fn set_diff(&mut self, diff: Diff, paths: [PathBuf; 2]) {
+        let secs = diff.elapsed.as_secs_f64();
+        let mut text = match diff.changes() {
+            0 => format!("No differences: the same items with the same sizes on both sides ({secs:.1} s)"),
+            1 => format!("Found 1 difference in {secs:.1} s"),
+            n => format!("Found {} differences in {secs:.1} s", format_count(u64::from(n))),
+        };
+        for (side, loc) in [("left", &diff.left), ("right", &diff.right)] {
+            if let Some(note) = &loc.info.note {
+                text.push_str(&format!(" — {side}: {note}"));
+            }
+        }
+        let mut view = View::new(&diff.tree);
+        view.tree_min_width = diff_view::MIN_WIDTH;
+        self.compared = Some(Compared { view, diff: Arc::new(diff), paths, show_identical: false });
+        self.treemap.reset();
+        self.info(text);
+    }
+
+    /// Opens the Compare dialog, filled in with the comparison or scan on screen (or the first
+    /// two drives).
+    fn open_compare_dialog(&mut self) {
+        let text = |p: &Path| p.display().to_string();
+        let (left, right) = if let Some(c) = &self.compared {
+            (text(&c.paths[0]), text(&c.paths[1]))
+        } else {
+            let drives: Vec<&PathBuf> = self.drives.iter().map(|d| &d.root).collect();
+            let left = match &self.loaded {
+                Some(l) if l.targets.len() == 1 => Some(&l.targets[0]),
+                _ => drives.first().copied(),
+            };
+            // A drive pairs up with the next drive; for a folder, the user picks the other side.
+            let right = left.filter(|l| drives.contains(l)).and_then(|l| drives.iter().find(|&&d| d != l));
+            (left.map(|p| text(p)).unwrap_or_default(), right.map(|p| text(p)).unwrap_or_default())
+        };
+        self.compare_dialog = Some(CompareDialog { left, right });
     }
 
     fn set_tree(&mut self, tree: Tree, targets: Vec<PathBuf>) {
@@ -374,6 +532,23 @@ impl App {
                 Err(TryRecvError::Disconnected) => {
                     self.scan = None;
                     self.error("The scan stopped unexpectedly");
+                }
+            }
+        }
+        if let Some(job) = &self.compare_job {
+            match job.rx.try_recv() {
+                Ok(result) => {
+                    let job = self.compare_job.take().expect("compare job present");
+                    match result {
+                        Ok(diff) => self.set_diff(diff, job.paths),
+                        Err(e) if e.is::<Cancelled>() => self.info("Comparison cancelled"),
+                        Err(e) => self.error(format!("Comparison failed: {e:#}")),
+                    }
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    self.compare_job = None;
+                    self.error("The comparison stopped unexpectedly");
                 }
             }
         }
@@ -444,6 +619,8 @@ impl App {
             Action::RescanAll => {
                 if let Some(targets) = self.loaded.as_ref().map(|l| l.targets.clone()) {
                     self.start_scan(targets, ctx);
+                } else if let Some(paths) = self.compared.as_ref().map(|c| c.paths.clone()) {
+                    self.start_compare(paths, ctx);
                 }
             }
             Action::ChooseFolder => {
@@ -455,6 +632,11 @@ impl App {
                 if let Some(job) = &self.scan {
                     job.progress.cancel.store(true, Ordering::Relaxed);
                 }
+                if let Some(job) = &self.compare_job {
+                    for p in &job.progress {
+                        p.cancel.store(true, Ordering::Relaxed);
+                    }
+                }
             }
             Action::SetMethod(m) => self.method = m,
             Action::InstallUpdate => self.start_update(ctx),
@@ -462,6 +644,9 @@ impl App {
                 let mut args = vec!["gui".to_string()];
                 if let Some(l) = &self.loaded {
                     args.extend(l.targets.iter().map(|p| p.display().to_string()));
+                } else if let Some(c) = &self.compared {
+                    args.push("--compare".into());
+                    args.extend(c.paths.iter().map(|p| p.display().to_string()));
                 }
                 args.push("--method".into());
                 args.push(self.method.to_string().to_lowercase());
@@ -518,10 +703,46 @@ impl App {
                     });
                 }
             }
+            Action::Export(_) if self.compared.is_some() => self.export_diff(ctx),
             Action::Export(format) => self.export(format, ctx),
+            Action::OpenCompare => self.open_compare_dialog(),
+            Action::BrowseCompare(side) => {
+                let title = format!("Choose the {} folder to compare", side.label());
+                if let Some(path) = rfd::FileDialog::new().set_title(title).pick_folder()
+                    && let Some(dialog) = &mut self.compare_dialog
+                {
+                    let field = match side {
+                        Side::Left => &mut dialog.left,
+                        Side::Right => &mut dialog.right,
+                    };
+                    *field = path.display().to_string();
+                }
+            }
+            Action::Compare(left, right) => self.start_compare([left, right], ctx),
+            Action::ShowIdentical(show) => {
+                if let Some(c) = &mut self.compared {
+                    c.show_identical = show;
+                    c.view.rows_dirty = true;
+                }
+            }
+            Action::RevealIn(id, side) => {
+                if let Some(p) = self.compared.as_ref().and_then(|c| c.diff.path(id, side))
+                    && let Err(e) = platform::reveal_in_explorer(&p)
+                {
+                    self.error(format!("Could not open Explorer: {e}"));
+                }
+            }
+            Action::CopyPathIn(id, side) => {
+                if let Some(p) = self.compared.as_ref().and_then(|c| c.diff.path(id, side)) {
+                    ctx.copy_text(p.display().to_string());
+                    self.info(format!("Copied {}", p.display()));
+                }
+            }
             other => {
                 if let Some(l) = &mut self.loaded {
                     apply_view_action(&l.tree, &mut l.view, other);
+                } else if let Some(c) = &mut self.compared {
+                    apply_view_action(&c.diff.tree, &mut c.view, other);
                 }
             }
         }
@@ -560,10 +781,37 @@ impl App {
         });
     }
 
+    /// Writes the differences of the comparison on screen to a CSV file.
+    fn export_diff(&mut self, ctx: &egui::Context) {
+        let Some(c) = &self.compared else { return };
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Export the differences as CSV")
+            .add_filter("CSV", &["csv"])
+            .set_file_name(format!("{}-differences.csv", crate::APP_NAME))
+            .save_file()
+        else {
+            return;
+        };
+        let diff = c.diff.clone();
+        let tx = self.jobs_tx.clone();
+        let ctx2 = ctx.clone();
+        self.jobs_running += 1;
+        self.info(format!("Exporting to {}…", path.display()));
+        std::thread::spawn(move || {
+            let result = std::fs::File::create(&path)
+                .map_err(anyhow::Error::from)
+                .and_then(|file| crate::export::write_diff_csv(&diff, std::io::BufWriter::new(file)))
+                .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(JobResult::Exported { path, result });
+            ctx2.request_repaint();
+        });
+    }
+
     fn toolbar(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         ui.horizontal_wrapped(|ui| {
-            let idle = self.scan.is_none();
-            let ready = idle && self.loaded.is_some();
+            let idle = !self.busy();
+            let current = self.current();
+            let ready = idle && current.is_some();
             if ui.add_enabled(idle, Button::new("📂 Open folder…")).clicked() {
                 actions.push(Action::ChooseFolder);
             }
@@ -594,20 +842,30 @@ impl App {
                     }
                 });
             });
+            if ui.add_enabled(idle, Button::new("↔ Compare…")).on_hover_text("Compare two drives or folders").clicked() {
+                actions.push(Action::OpenCompare);
+            }
             ui.separator();
             if ui.add_enabled(ready, Button::new("⟳ Rescan")).on_hover_text("Scan the same location again").clicked() {
                 actions.push(Action::RescanAll);
             }
-            let can_go_up = self.loaded.as_ref().is_some_and(|l| l.view.selected.is_some_and(|s| l.tree.node(s).parent.is_some()));
+            let can_go_up = current.is_some_and(|(t, v)| v.selected.is_some_and(|s| t.node(s).parent.is_some()));
             if ui.add_enabled(ready && can_go_up, Button::new("⬆ Up")).on_hover_text("Select the parent folder").clicked() {
                 actions.push(Action::SelectParent);
             }
-            let zoomed = self.loaded.as_ref().is_some_and(|l| l.view.zoom != l.tree.root());
+            let zoomed = current.is_some_and(|(t, v)| v.zoom != t.root());
             if ui.add_enabled(ready && zoomed, Button::new("🔍 Zoom out")).on_hover_text("Show the parent folder in the treemap").clicked() {
                 actions.push(Action::ZoomOut);
             }
             ui.add_enabled_ui(ready, |ui| {
                 ui.menu_button("💾 Export", |ui| {
+                    if self.compared.is_some() {
+                        if ui.button("CSV (one row per difference)…").clicked() {
+                            actions.push(Action::Export(ExportFormat::Csv));
+                            ui.close();
+                        }
+                        return;
+                    }
                     if ui.button("CSV (one row per file and folder)…").clicked() {
                         actions.push(Action::Export(ExportFormat::Csv));
                         ui.close();
@@ -699,6 +957,28 @@ impl App {
                     let path = t.path_of(sel).map(|p| p.display().to_string()).unwrap_or_else(|| n.name.to_string());
                     ui.label(format!("{}  ({})", path, format_size(n.size)));
                 }
+            } else if let Some(c) = &self.compared {
+                let d = &c.diff;
+                let (lm, rm) = (d.left.info.method, d.right.info.method);
+                let method = if lm == rm { lm.to_string() } else { format!("{lm} + {rm}") };
+                ui.label(format!(
+                    "Left {}  •  Right {}  •  {} differences  •  {} in {:.1} s",
+                    format_size(d.left.size),
+                    format_size(d.right.size),
+                    format_count(u64::from(d.changes())),
+                    method,
+                    d.elapsed.as_secs_f64()
+                ));
+                let unreadable = d.left.info.unreadable + d.right.info.unreadable;
+                if unreadable > 0 {
+                    ui.label(RichText::new(format!("⚠ {} unreadable folders", format_count(unreadable))).color(Color32::from_rgb(230, 160, 40)));
+                }
+                if let Some(sel) = c.view.selected {
+                    ui.separator();
+                    let e = d.entry(sel);
+                    let side = |s: Side| if e.on(s) { format_size(e.size(s)) } else { "—".to_owned() };
+                    ui.label(format!("{}  (left {}, right {})", d.display_path(sel), side(Side::Left), side(Side::Right)));
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(RichText::new(if self.elevated { "Administrator" } else { "Standard user" }).weak());
@@ -776,9 +1056,15 @@ impl App {
                 ui.add_space(4.0);
                 self.multi_drive_buttons(ui, actions);
                 ui.add_space(8.0);
-                if ui.add_sized([180.0, 32.0], Button::new("📂 Open folder…")).clicked() {
-                    actions.push(Action::ChooseFolder);
-                }
+                ui.horizontal(|ui| {
+                    if ui.add_sized([180.0, 32.0], Button::new("📂 Open folder…")).clicked() {
+                        actions.push(Action::ChooseFolder);
+                    }
+                    let compare = ui.add_sized([260.0, 32.0], Button::new("↔ Compare two drives or folders…"));
+                    if compare.on_hover_text("See what differs between two locations, e.g. a disk and its backup").clicked() {
+                        actions.push(Action::OpenCompare);
+                    }
+                });
                 if !self.elevated && cfg!(windows) {
                     ui.add_space(20.0);
                     egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -790,6 +1076,62 @@ impl App {
                 }
             });
         });
+    }
+
+    fn compare_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        let drives = &self.drives;
+        let Some(dialog) = &mut self.compare_dialog else { return };
+        // Only Compare, Cancel and Escape close it: a stray click outside keeps what was typed.
+        let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        egui::Modal::new(egui::Id::unique("compare-dialog")).show(ctx, |ui| {
+            ui.set_width(600.0);
+            ui.heading("Compare two drives or folders");
+            ui.add_space(4.0);
+            ui.label("Both are scanned, then matched item by item: the result shows what is on one side only and what differs in size.");
+            ui.add_space(10.0);
+            egui::Grid::new("compare-fields").num_columns(4).spacing([8.0, 8.0]).show(ui, |ui| {
+                for (side, field) in [(Side::Left, &mut dialog.left), (Side::Right, &mut dialog.right)] {
+                    ui.label(if side == Side::Left { "Left:" } else { "Right:" });
+                    // A fixed size: in a grid, a text field would otherwise shrink to nothing.
+                    let size = [330.0, ui.spacing().interact_size.y];
+                    ui.add_sized(size, egui::TextEdit::singleline(field).hint_text("A drive or folder, e.g. D:\\Photos"));
+                    ui.menu_button("💽 Drive", |ui| {
+                        for d in drives {
+                            if ui.button(d.root.display().to_string()).clicked() {
+                                *field = d.root.display().to_string();
+                                ui.close();
+                            }
+                        }
+                    });
+                    if ui.button("Browse…").clicked() {
+                        actions.push(Action::BrowseCompare(side));
+                    }
+                    ui.end_row();
+                }
+            });
+            ui.add_space(10.0);
+            let paths = dialog.paths();
+            // The line stays (empty) once both locations are fine, so the buttons don't move.
+            ui.label(RichText::new(paths.as_ref().err().copied().unwrap_or_default()).weak());
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.add_enabled(paths.is_ok(), Button::new(RichText::new("Compare").strong())).clicked()
+                    && let Ok([left, right]) = paths
+                {
+                    actions.push(Action::Compare(left, right));
+                    close = true;
+                }
+                if ui.button("⇄ Swap sides").clicked() {
+                    std::mem::swap(&mut dialog.left, &mut dialog.right);
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+        });
+        if close {
+            self.compare_dialog = None;
+        }
     }
 
     fn delete_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
@@ -896,14 +1238,18 @@ impl eframe::App for App {
             egui::CentralPanel::default().show(ui, |ui| scanning_ui(ui, job, &mut actions));
             // About 60 fps for the spinner and counters (frames aren't paced by vsync).
             ctx.request_repaint_after(Duration::from_millis(16));
+        } else if let Some(job) = &self.compare_job {
+            egui::CentralPanel::default().show(ui, |ui| comparing_ui(ui, job, &mut actions));
+            ctx.request_repaint_after(Duration::from_millis(16));
         } else if let Some(loaded) = &mut self.loaded {
             let tree = loaded.tree.clone();
+            let source = Source::Scan(tree.clone());
             let height = ui.available_height();
             egui::Panel::bottom("treemap")
                 .resizable(true)
                 .default_size(height * 0.5)
                 .min_size(120.0)
-                .show(ui, |ui| treemap_view::show(ui, &tree, &mut loaded.view, &mut self.treemap, &mut actions));
+                .show(ui, |ui| treemap_view::show(ui, &source, &mut loaded.view, &mut self.treemap, &mut actions));
             // Keep enough room for the tree table so the panel never covers its columns.
             let max_types = (ui.available_width() - loaded.view.tree_min_width).max(TYPES_MIN_WIDTH);
             egui::Panel::right("types")
@@ -912,6 +1258,24 @@ impl eframe::App for App {
                 .size_range(TYPES_MIN_WIDTH..=max_types)
                 .show(ui, |ui| ext_view::show(ui, &tree, &loaded.view, &mut actions));
             egui::CentralPanel::default().show(ui, |ui| tree_view::show(ui, &tree, &mut loaded.view, &mut actions));
+        } else if let Some(c) = &mut self.compared {
+            let diff = c.diff.clone();
+            let source = Source::Diff(diff.clone());
+            let height = ui.available_height();
+            egui::Panel::bottom("treemap")
+                .resizable(true)
+                .default_size(height * 0.5)
+                .min_size(120.0)
+                .show(ui, |ui| treemap_view::show(ui, &source, &mut c.view, &mut self.treemap, &mut actions));
+            let max_summary = (ui.available_width() - c.view.tree_min_width).max(TYPES_MIN_WIDTH);
+            egui::Panel::right("diff-summary")
+                .resizable(true)
+                .default_size(330.0)
+                .size_range(TYPES_MIN_WIDTH..=max_summary)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| diff_view::summary(ui, &diff, &c.view, c.show_identical, &mut actions));
+                });
+            egui::CentralPanel::default().show(ui, |ui| diff_view::table(ui, &diff, &mut c.view, c.show_identical, &mut actions));
         } else {
             egui::CentralPanel::default().show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| self.welcome(ui, &mut actions));
@@ -919,6 +1283,7 @@ impl eframe::App for App {
         }
 
         self.delete_dialog(&ctx, &mut actions);
+        self.compare_dialog(&ctx, &mut actions);
         for action in actions {
             self.apply(action, &ctx);
         }
@@ -948,6 +1313,55 @@ fn spinner(ui: &mut egui::Ui) {
     ui.painter().add(egui::Shape::line(points, egui::Stroke::new(3.0, ui.visuals().strong_text_color())));
 }
 
+/// MFT progress of a scan, once the record count is known.
+fn mft_progress(ui: &mut egui::Ui, p: &Progress) {
+    let total = p.records_total.load(Ordering::Relaxed);
+    if total > 0 {
+        let done = p.records_done.load(Ordering::Relaxed).min(total);
+        ui.add_space(8.0);
+        ui.add(
+            ProgressBar::new(done as f32 / total as f32)
+                .desired_width(420.0)
+                .text(format!("MFT records {} / {}", format_count(done), format_count(total))),
+        );
+    }
+}
+
+fn counters(p: &Progress) -> String {
+    format!(
+        "{} files   •   {} folders   •   {}",
+        format_count(p.files.load(Ordering::Relaxed)),
+        format_count(p.dirs.load(Ordering::Relaxed)),
+        format_size(p.bytes.load(Ordering::Relaxed))
+    )
+}
+
+fn comparing_ui(ui: &mut egui::Ui, job: &CompareJob, actions: &mut Vec<Action>) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(48.0);
+        spinner(ui);
+        ui.add_space(8.0);
+        ui.heading(format!("Comparing {} with {}", job.paths[0].display(), job.paths[1].display()));
+        ui.add_space(12.0);
+        if job.matching.load(Ordering::Relaxed) {
+            ui.label(RichText::new("Matching the two scans…").size(16.0));
+        } else {
+            for (label, p) in [("Left", &job.progress[0]), ("Right", &job.progress[1])] {
+                ui.label(RichText::new(format!("{label}:   {}", counters(p))).size(16.0));
+                mft_progress(ui, p);
+                ui.label(RichText::new(p.current()).weak());
+                ui.add_space(10.0);
+            }
+        }
+        ui.label(format!("{:.1} s", job.started.elapsed().as_secs_f64()));
+        ui.add_space(12.0);
+        let cancelling = job.progress[0].is_cancelled();
+        if ui.add_enabled(!cancelling, Button::new(if cancelling { "Cancelling…" } else { "Cancel" })).clicked() {
+            actions.push(Action::CancelScan);
+        }
+    });
+}
+
 fn scanning_ui(ui: &mut egui::Ui, job: &ScanJob, actions: &mut Vec<Action>) {
     let p = &job.progress;
     ui.vertical_centered(|ui| {
@@ -956,25 +1370,8 @@ fn scanning_ui(ui: &mut egui::Ui, job: &ScanJob, actions: &mut Vec<Action>) {
         ui.add_space(8.0);
         ui.heading(format!("Scanning {}", paths_label(&job.paths)));
         ui.add_space(12.0);
-        ui.label(
-            RichText::new(format!(
-                "{} files   •   {} folders   •   {}",
-                format_count(p.files.load(Ordering::Relaxed)),
-                format_count(p.dirs.load(Ordering::Relaxed)),
-                format_size(p.bytes.load(Ordering::Relaxed))
-            ))
-            .size(16.0),
-        );
-        let total = p.records_total.load(Ordering::Relaxed);
-        if total > 0 {
-            let done = p.records_done.load(Ordering::Relaxed).min(total);
-            ui.add_space(8.0);
-            ui.add(
-                ProgressBar::new(done as f32 / total as f32)
-                    .desired_width(420.0)
-                    .text(format!("MFT records {} / {}", format_count(done), format_count(total))),
-            );
-        }
+        ui.label(RichText::new(counters(p)).size(16.0));
+        mft_progress(ui, p);
         ui.add_space(8.0);
         ui.label(RichText::new(p.current()).weak());
         ui.label(format!("{:.1} s", job.started.elapsed().as_secs_f64()));

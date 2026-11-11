@@ -6,6 +6,7 @@
 
 pub mod cli;
 pub mod colors;
+pub mod diff;
 pub mod export;
 pub mod gui;
 pub mod model;

@@ -4,4 +4,4 @@ pub mod layout;
 pub mod render;
 
 pub use layout::{Layout, LayoutItem, Rect, layout};
-pub use render::render;
+pub use render::{Paint, render, render_with};

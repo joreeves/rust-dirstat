@@ -689,3 +689,221 @@ fn completed_delete_and_rescan_update_tree_and_treemap() {
     assert_eq!(t.node(t.root()).size, 1_070_000);
     assert!(h.state().message.as_ref().is_some_and(|m| m.text.starts_with("Rescanned")));
 }
+
+fn compared(app: &App) -> &Compared {
+    app.compared.as_ref().expect("a comparison on screen")
+}
+
+/// The node of the comparison at `rel` (a path relative to the compared roots).
+fn diff_node(app: &App, rel: &str) -> NodeId {
+    let d = &compared(app).diff;
+    d.tree
+        .preorder(d.tree.root(), None)
+        .map(|(id, _)| id)
+        .find(|&id| d.relative_path(id).is_some_and(|p| p == Path::new(rel)))
+        .unwrap_or_else(|| panic!("{rel} not in the comparison"))
+}
+
+/// Two fixtures where small.txt is larger on the right, tiny.log is only on the left and
+/// extra.iso only on the right.
+fn differing_fixtures() -> (Fixture, Fixture) {
+    let (a, b) = (fixture(), fixture());
+    fs::write(b.root.join("small.txt"), vec![0u8; 150_000]).unwrap();
+    fs::remove_file(b.root.join("tiny.log")).unwrap();
+    fs::write(b.root.join("extra.iso"), vec![0u8; 500_000]).unwrap();
+    (a, b)
+}
+
+fn idle_harness() -> Harness<'static, App> {
+    Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_accessibility_check(false)
+        .allow_missing_glyphs()
+        .build_eframe(|cc| App::new(cc, Vec::new(), Method::Walk))
+}
+
+/// The summary panel's button for a kind of difference (the table shows the same words).
+fn summary_button<'a>(h: &'a Harness<'_, App>, label: &'a str) -> egui_kittest::Node<'a> {
+    h.get_by(move |n| n.role() == egui::accesskit::Role::Button && n.label().as_deref() == Some(label))
+}
+
+fn is_disabled(node: egui_kittest::Node<'_>) -> bool {
+    use egui_kittest::kittest::NodeT;
+    node.accesskit_node().is_disabled()
+}
+
+#[test]
+fn compare_two_folders_from_the_dialog() {
+    let (a, b) = differing_fixtures();
+    let mut h = idle_harness();
+    fake_drives(&mut h, &[&a.root, &b.root]);
+
+    // The dialog suggests the first two drives.
+    h.get_by_label("↔ Compare…").click();
+    // The dialog's grid is laid out invisibly in its first frame.
+    h.run_steps(4);
+    let dialog = h.state().compare_dialog.as_ref().expect("dialog open");
+    assert_eq!(dialog.left, a.root.display().to_string());
+    assert_eq!(dialog.right, b.root.display().to_string());
+    h.get_by_label("Compare").click();
+    h.step();
+    assert!(h.state().compare_job.is_some());
+    assert!(h.state().compare_dialog.is_none());
+    wait(&mut h, "comparison", |app| app.compared.is_some() && app.treemap.is_current());
+
+    let app = h.state();
+    let d = &compared(app).diff;
+    assert_eq!(d.changes(), 3);
+    assert_eq!((d.left.size, d.right.size), (1_000_000, 1_500_000));
+    assert!(app.message.as_ref().is_some_and(|m| m.text.starts_with("Found 3 differences")));
+    h.get_by_label_contains("  •  3 differences  •  ");
+    h.get_by_label("Right is 488 KiB larger");
+
+    // Differences are listed; identical items only on request.
+    h.get_by_label("📄 extra.iso");
+    h.get_by_label("📄 small.txt");
+    h.get_by_label("📄 tiny.log");
+    h.get_by_label("+29.3 KiB");
+    assert!(h.query_by_label("📁 alpha_dir").is_none());
+    h.get_by_label("Show identical items in the table").click();
+    h.run_steps(2);
+    h.get_by_label("📁 alpha_dir");
+    assert!(compared(h.state()).show_identical);
+
+    // A kind of difference in the summary highlights its tiles.
+    summary_button(&h, "Only in right").click();
+    h.run_steps(2);
+    let only_right = crate::diff::Status::OnlyRight.index() as u32;
+    assert_eq!(compared(h.state()).view.highlight_ext, Some(only_right));
+    wait(&mut h, "highlighted treemap", |app| app.treemap.shown_highlight() == Some(Some(only_right)));
+    assert!(is_disabled(summary_button(&h, "Same size")), "identical items have no tiles");
+
+    // Clicking a tile selects the item and the status bar shows both sizes.
+    let extra = diff_node(h.state(), "extra.iso");
+    let pos = h.state().treemap.tile_center(&compared(h.state()).diff.tree, extra).expect("extra.iso tile");
+    click_at(&mut h, pos, PointerButton::Primary);
+    assert_eq!(compared(h.state()).view.selected, Some(extra));
+    h.get_by_label_contains(&format!("extra.iso  (left —, right {})", format_size(500_000)));
+
+    // The right-click menu works per side: extra.iso is only on the right.
+    h.get_by_label("📄 extra.iso").click_secondary();
+    h.run_steps(2);
+    assert!(is_disabled(h.get_by_label("Reveal left in Explorer")));
+    h.get_by_label("Copy right path").click();
+    h.run_steps(2);
+    let msg = h.state().message.as_ref().map(|m| m.text.clone()).unwrap_or_default();
+    let expected = scan::normalize_root(&b.root).join("extra.iso");
+    assert_eq!(msg, format!("Copied {}", expected.display()));
+
+    // Rescan compares the same two locations again.
+    fs::write(a.root.join("tiny.log"), vec![0u8; 10]).unwrap();
+    h.get_by_label("⟳ Rescan").click();
+    h.step();
+    assert!(h.state().compare_job.as_ref().is_some_and(|j| j.paths == [a.root.clone(), b.root.clone()]));
+    wait(&mut h, "second comparison", |app| app.compared.is_some());
+    let tiny = diff_node(h.state(), "tiny.log");
+    assert_eq!(compared(h.state()).diff.entry(tiny).left, 10);
+
+    // Scanning a single location replaces the comparison.
+    h.state_mut().selected_drives.insert(a.root.clone());
+    h.get_by_label("💽 Drives").click();
+    h.run_steps(2);
+    h.get_by_label("Scan 1 selected drive").click();
+    h.step();
+    wait(&mut h, "single scan", |app| app.loaded.is_some());
+    assert!(h.state().compared.is_none());
+}
+
+#[test]
+fn compare_dialog_checks_the_locations() {
+    let (a, _) = differing_fixtures();
+    let mut h = idle_harness();
+    fake_drives(&mut h, &[&a.root]);
+    h.get_by_label("↔ Compare two drives or folders…").click();
+    h.run_steps(4);
+    // One drive: the right side is left for the user to choose.
+    assert_eq!(h.state().compare_dialog.as_ref().unwrap().right, "");
+    h.get_by_label("Choose a drive or folder for both sides.");
+    assert!(is_disabled(h.get_by_label("Compare")));
+
+    let same = a.root.join("alpha_dir").display().to_string();
+    let dialog = h.state_mut().compare_dialog.as_mut().unwrap();
+    dialog.left = same.clone();
+    dialog.right = format!("{}\\", same.to_uppercase());
+    h.run_steps(2);
+    h.get_by_label("Choose two different locations.");
+    h.get_by_label("Compare").click();
+    h.run_steps(2);
+    assert!(h.state().compare_job.is_none(), "nothing to compare");
+
+    h.state_mut().compare_dialog.as_mut().unwrap().right = a.root.join("missing").display().to_string();
+    h.run_steps(2);
+    h.get_by_label("The right location isn't a drive or folder.");
+
+    h.state_mut().compare_dialog.as_mut().unwrap().right = a.root.display().to_string();
+    h.run_steps(2);
+    h.get_by_label("⇄ Swap sides").click();
+    h.run_steps(2);
+    let dialog = h.state().compare_dialog.as_ref().unwrap();
+    assert_eq!((dialog.left.as_str(), dialog.right.as_str()), (a.root.display().to_string().as_str(), same.as_str()));
+    assert!(!is_disabled(h.get_by_label("Compare")));
+
+    // Clicking next to the dialog keeps it; Escape closes it.
+    click_at(&mut h, egui::pos2(5.0, 790.0), PointerButton::Primary);
+    assert!(h.state().compare_dialog.is_some());
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    assert!(h.state().compare_dialog.is_none());
+    h.get_by_label("↔ Compare…").click();
+    h.run_steps(4);
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    assert!(h.state().compare_dialog.is_none());
+}
+
+#[test]
+fn a_failed_comparison_is_reported() {
+    let (a, _) = differing_fixtures();
+    let mut h = idle_harness();
+    let ctx = h.ctx.clone();
+    h.state_mut().apply(Action::Compare(a.root.clone(), a.root.join("missing")), &ctx);
+    wait(&mut h, "failed comparison", |app| app.compare_job.is_none());
+    let msg = h.state().message.as_ref().unwrap();
+    assert!(msg.error && msg.text.starts_with("Comparison failed: could not scan"), "{}", msg.text);
+    assert!(h.state().compared.is_none());
+    h.get_by_label("↔ Compare two drives or folders…");
+}
+
+/// Renders the comparison view and the Compare dialog (see `render_layout`).
+#[test]
+#[ignore]
+fn render_compare() {
+    let Some(out) = std::env::var_os("DIRSTAT_SNAPSHOT_DIR").map(PathBuf::from) else { return };
+    let (a, b) = differing_fixtures();
+    for i in 0..40 {
+        fs::write(b.root.join("alpha_dir").join(format!("added-{i}.dat")), vec![0u8; 5_000 + i * 3_000]).unwrap();
+    }
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 840.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_accessibility_check(false)
+        .wgpu()
+        .build_eframe(|cc| {
+            // System fonts for the icons, like the real window.
+            cc.egui_ctx.add_font_provider(std::sync::Arc::new(egui_system_font_provider::SystemFontProvider::new()));
+            App::new(cc, Vec::new(), Method::Walk)
+        });
+    fake_drives(&mut h, &[&a.root, &b.root]);
+    h.get_by_label("↔ Compare…").click();
+    h.run_steps(4);
+    h.render().unwrap().save(out.join("compare-dialog.png")).unwrap();
+    h.get_by_label("Compare").click();
+    h.step();
+    wait(&mut h, "comparison", |app| app.compared.is_some() && app.treemap.is_current());
+    let alpha = diff_node(h.state(), "alpha_dir");
+    let ctx = h.ctx.clone();
+    h.state_mut().apply(Action::Toggle(alpha), &ctx);
+    h.run_steps(3);
+    h.render().unwrap().save(out.join("compare-view.png")).unwrap();
+}

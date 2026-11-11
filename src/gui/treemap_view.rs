@@ -9,11 +9,29 @@ use eframe::egui::{
     TextureOptions, pos2,
 };
 
-use super::View;
 use super::actions::{Action, context_menu};
+use super::{View, diff_view};
+use crate::diff::Diff;
 use crate::model::{NodeId, Tree};
-use crate::treemap::{self, Layout};
+use crate::treemap::{self, Layout, Paint};
 use crate::util::{format_count, format_size, percent};
+
+/// What the treemap shows: a scan, colored by file type, or a comparison, where tile areas are
+/// the bytes that differ and colors show how they differ.
+#[derive(Clone)]
+pub enum Source {
+    Scan(Arc<Tree>),
+    Diff(Arc<Diff>),
+}
+
+impl Source {
+    pub fn tree(&self) -> &Tree {
+        match self {
+            Source::Scan(tree) => tree,
+            Source::Diff(diff) => &diff.tree,
+        }
+    }
+}
 
 /// Everything that determines the rendered image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,11 +116,15 @@ impl TreemapView {
     }
 }
 
-pub fn show(ui: &mut egui::Ui, tree: &Arc<Tree>, view: &mut View, tm: &mut TreemapView, actions: &mut Vec<Action>) {
+pub fn show(ui: &mut egui::Ui, source: &Source, view: &mut View, tm: &mut TreemapView, actions: &mut Vec<Action>) {
+    let tree = source.tree();
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.strong("Treemap");
-        let zoom_path = tree.path_of(view.zoom).map(|p| p.display().to_string()).unwrap_or_else(|| tree.node(view.zoom).name.to_string());
+        let zoom_path = match source {
+            Source::Scan(_) => tree.path_of(view.zoom).map(|p| p.display().to_string()).unwrap_or_else(|| tree.node(view.zoom).name.to_string()),
+            Source::Diff(diff) => diff.display_path(view.zoom),
+        };
         ui.label(RichText::new(zoom_path).monospace());
         if view.zoom != tree.root() {
             if ui.small_button("⬆ Zoom out").clicked() {
@@ -112,7 +134,11 @@ pub fn show(ui: &mut egui::Ui, tree: &Arc<Tree>, view: &mut View, tm: &mut Treem
                 actions.push(Action::ZoomReset);
             }
         }
-        ui.label(RichText::new("double-click a tile to zoom in • right-click for actions").weak());
+        let hint = match source {
+            Source::Scan(_) => "double-click a tile to zoom in • right-click for actions",
+            Source::Diff(_) => "areas show the bytes that differ • double-click a tile to zoom in • right-click for actions",
+        };
+        ui.label(RichText::new(hint).weak());
     });
     ui.add_space(2.0);
 
@@ -133,7 +159,7 @@ pub fn show(ui: &mut egui::Ui, tree: &Arc<Tree>, view: &mut View, tm: &mut Treem
     let key = Key { zoom: view.zoom, size, generation: tm.generation, dark: ui.visuals().dark_mode, highlight: view.highlight_ext };
 
     receive(tm, &ctx);
-    request(tm, tree, key, background, &ctx);
+    request(tm, source, key, background, &ctx);
 
     let painter = ui.painter_at(rect);
     match &tm.texture {
@@ -146,7 +172,11 @@ pub fn show(ui: &mut egui::Ui, tree: &Arc<Tree>, view: &mut View, tm: &mut Treem
         }
     }
     if tree.node(view.zoom).size == 0 {
-        painter.text(rect.center(), Align2::CENTER_CENTER, "Nothing to show (empty)", FontId::proportional(16.0), ui.visuals().weak_text_color());
+        let text = match source {
+            Source::Scan(_) => "Nothing to show (empty)",
+            Source::Diff(_) => "No differences in size here",
+        };
+        painter.text(rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(16.0), ui.visuals().weak_text_color());
     }
     let Some(layout) = &tm.layout else { return };
     if layout.width <= 0.0 || layout.height <= 0.0 {
@@ -190,13 +220,19 @@ pub fn show(ui: &mut egui::Ui, tree: &Arc<Tree>, view: &mut View, tm: &mut Treem
     }
 
     let response = match hovered {
-        Some(i) => response.on_hover_ui_at_pointer(|ui| tooltip(ui, tree, view.zoom, layout, i)),
+        Some(i) => response.on_hover_ui_at_pointer(|ui| match source {
+            Source::Scan(tree) => tooltip(ui, tree, view.zoom, layout, i),
+            Source::Diff(diff) => diff_view::tooltip(ui, diff, layout.items[i].node),
+        }),
         None => response,
     };
     let context_node = tm.context_node;
     response.context_menu(|ui| {
         if let Some(id) = context_node.filter(|&id| tree.is_reachable(id)) {
-            context_menu(ui, tree, id, actions);
+            match source {
+                Source::Scan(tree) => context_menu(ui, tree, id, actions),
+                Source::Diff(diff) => diff_view::context_menu(ui, diff, id, actions),
+            }
         }
     });
 }
@@ -234,7 +270,7 @@ fn receive(tm: &mut TreemapView, ctx: &egui::Context) {
 }
 
 /// Starts a render for `key` unless one is running; resizes are debounced.
-fn request(tm: &mut TreemapView, tree: &Arc<Tree>, key: Key, background: Color32, ctx: &egui::Context) {
+fn request(tm: &mut TreemapView, source: &Source, key: Key, background: Color32, ctx: &egui::Context) {
     if tm.shown == Some(key) {
         return;
     }
@@ -254,14 +290,14 @@ fn request(tm: &mut TreemapView, tree: &Arc<Tree>, key: Key, background: Color32
         // Only the highlight changed: draw the same layout again.
         let same_layout = tm.shown.is_some_and(|s| Key { highlight: key.highlight, ..s } == key);
         let layout = tm.layout.clone().filter(|_| same_layout);
-        tm.pending = Some(spawn_render(tree.clone(), key, layout, background, ctx.clone()));
+        tm.pending = Some(spawn_render(source.clone(), key, layout, background, ctx.clone()));
     } else {
         ctx.request_repaint_after(delay.saturating_sub(since).max(Duration::from_millis(16)));
     }
 }
 
 fn spawn_render(
-    tree: Arc<Tree>,
+    source: Source,
     key: Key,
     layout: Option<Arc<Layout>>,
     background: Color32,
@@ -272,8 +308,16 @@ fn spawn_render(
         .name("treemap".into())
         .spawn(move || {
             let [w, h] = key.size;
-            let layout = layout.unwrap_or_else(|| Arc::new(treemap::layout(&tree, key.zoom, w as f32, h as f32)));
-            let pixels = treemap::render(&layout, &tree, w, h, background, key.highlight);
+            let layout = layout.unwrap_or_else(|| Arc::new(treemap::layout(source.tree(), key.zoom, w as f32, h as f32)));
+            let pixels = match &source {
+                Source::Scan(tree) => treemap::render(&layout, tree, w, h, background, key.highlight),
+                // Here the highlight is a status: light up the files that differ that way.
+                Source::Diff(diff) => treemap::render_with(&layout, w, h, background, |item| {
+                    let status = diff.color_status(item.node);
+                    let lit = key.highlight == Some(status.index() as u32) && diff.tree.node(item.node).is_file();
+                    Paint { color: status.rgb(), lit }
+                }),
+            };
             let image = ColorImage::new([w, h], pixels);
             let _ = tx.send(Rendered { key, layout, image });
             ctx.request_repaint();
