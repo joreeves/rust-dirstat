@@ -6,6 +6,18 @@ All notable changes to rust-dirstat are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Compare two drives or folders, for example a disk and its backup. Click **↔ Compare…**,
+  choose the two locations, and rust-dirstat scans both at once. It then shows:
+  - what is only on one side and what differs in size, with the sizes on each side;
+  - totals for each kind of difference;
+  - a treemap of just the bytes that differ, colored by how they differ.
+
+  Items are matched by path, and files are compared by size. Right-click an item to reveal it
+  or copy its path on either side. You can export the differences to CSV. From a terminal,
+  `rust-dirstat diff LEFT RIGHT` prints the same comparison as a report.
+
 ## [0.4.0] - 2026-11-10
 
 ### Added

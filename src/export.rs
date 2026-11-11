@@ -1,4 +1,4 @@
-//! CSV and JSON export of a scanned tree.
+//! CSV and JSON export of a scanned tree, and CSV export of a comparison.
 
 use std::io::Write;
 use std::path::MAIN_SEPARATOR;
@@ -6,6 +6,7 @@ use std::path::MAIN_SEPARATOR;
 use serde::Serialize;
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
 
+use crate::diff::{Diff, Side};
 use crate::model::{NodeId, Tree, flags};
 
 fn kind(tree: &Tree, id: NodeId) -> &'static str {
@@ -58,6 +59,35 @@ pub fn write_csv<W: Write>(tree: &Tree, from: NodeId, max_depth: Option<usize>, 
             &depth.to_string(),
         ])?;
         paths.push(path);
+    }
+    w.flush()?;
+    Ok(())
+}
+
+/// Writes one CSV row per item of a comparison that differs, in pre-order with the biggest
+/// difference first, after a row for the two roots (path `.`). Paths are relative to the roots;
+/// sizes are empty for the side an item is missing from.
+pub fn write_diff_csv<W: Write>(diff: &Diff, out: W) -> anyhow::Result<()> {
+    let mut w = csv::Writer::from_writer(out);
+    w.write_record(["path", "type", "status", "left_bytes", "right_bytes", "difference_bytes", "depth"])?;
+    let tree = &diff.tree;
+    let mut stack = vec![(tree.root(), 0usize)];
+    while let Some((id, depth)) = stack.pop() {
+        let e = diff.entry(id);
+        let path = if id == tree.root() { ".".to_owned() } else { diff.display_path(id) };
+        let size = |side: Side| if e.on(side) { e.size(side).to_string() } else { String::new() };
+        let difference = (i128::from(e.right) - i128::from(e.left)).to_string();
+        w.write_record([
+            path.as_str(),
+            kind(tree, id),
+            e.status.slug(),
+            &size(Side::Left),
+            &size(Side::Right),
+            &difference,
+            &depth.to_string(),
+        ])?;
+        let children = &tree.node(id).children;
+        stack.extend(children.iter().rev().filter(|&&c| diff.entry(c).changes > 0).map(|&c| (c, depth + 1)));
     }
     w.flush()?;
     Ok(())
@@ -189,6 +219,26 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         let paths: Vec<&str> = text.lines().skip(1).map(|l| l.split(',').next().unwrap()).collect();
         assert_eq!(paths, ["C:\\ + D:\\", "D:\\", "D:\\b.bin", "C:\\", "C:\\a.txt"]);
+    }
+
+    #[test]
+    fn diff_csv_lists_only_differences() {
+        let file = |n: &str, s: u64| ScanNode { name: n.into(), size: s, flags: 0, children: vec![] };
+        let dir = |n: &str, children| ScanNode { name: n.into(), size: 0, flags: flags::DIR, children };
+        let left = Tree::from_scan("L:\\", dir("L", vec![file("same.txt", 5), dir("sub", vec![file("a.bin", 20)]), file("old.log", 3)]));
+        let right = Tree::from_scan("R:\\", dir("R", vec![file("same.txt", 5), dir("sub", vec![file("a.bin", 32)])]));
+        let d = Diff::new(&left, &right);
+        let mut out = Vec::new();
+        write_diff_csv(&d, &mut out).unwrap();
+        let sep = MAIN_SEPARATOR;
+        let expected = format!(
+            "path,type,status,left_bytes,right_bytes,difference_bytes,depth\n\
+             .,dir,larger_right,28,37,9,0\n\
+             sub,dir,larger_right,20,32,12,1\n\
+             sub{sep}a.bin,file,larger_right,20,32,12,2\n\
+             old.log,file,only_left,3,,-3,1\n"
+        );
+        assert_eq!(String::from_utf8(out).unwrap(), expected);
     }
 
     #[test]

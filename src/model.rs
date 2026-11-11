@@ -390,8 +390,15 @@ impl Tree {
 
     /// The filesystem path of a node, or `None` for nodes inside a synthetic `NO_PATH` group.
     pub fn path_of(&self, id: NodeId) -> Option<PathBuf> {
+        // The virtual root of a multi-drive tree has no path of its own.
+        self.path_under(&self.root_path, id).filter(|p| !p.as_os_str().is_empty())
+    }
+
+    /// The path of a node below `base` instead of the tree's own root path (an empty `base`
+    /// gives the path relative to the root), or `None` inside a synthetic `NO_PATH` group.
+    pub fn path_under(&self, base: &Path, id: NodeId) -> Option<PathBuf> {
         let chain = self.ancestry(id);
-        let mut path = self.root_path.clone();
+        let mut path = base.to_path_buf();
         for &n in chain.iter().skip(1) {
             let node = &self.nodes[n.index()];
             if node.flags & flags::NO_PATH != 0 {
@@ -402,8 +409,12 @@ impl Tree {
             }
             path.push(&*node.name);
         }
-        // The virtual root of a multi-drive tree has no path of its own.
-        (!path.as_os_str().is_empty()).then_some(path)
+        Some(path)
+    }
+
+    /// Renames a node (e.g. the root of a tree built in memory).
+    pub fn set_name(&mut self, id: NodeId, name: &str) {
+        self.nodes[id.index()].name = name.into();
     }
 
     /// Combines separately scanned trees (e.g. several drives) under one virtual root. Each
@@ -447,17 +458,18 @@ impl Tree {
     /// Extension index of the largest file reached by following the largest child downwards;
     /// used to color directories that are too small to subdivide in the treemap.
     pub fn dominant_ext(&self, id: NodeId) -> u32 {
+        let n = &self.nodes[self.dominant_leaf(id).index()];
+        if n.is_dir() { NO_EXT } else { n.ext }
+    }
+
+    /// The node reached by following the largest child downwards from `id` (`id` itself if it
+    /// has no children): the item whose color a directory too small to subdivide takes.
+    pub fn dominant_leaf(&self, id: NodeId) -> NodeId {
         let mut cur = id;
-        loop {
-            let n = &self.nodes[cur.index()];
-            if !n.is_dir() {
-                return n.ext;
-            }
-            match n.children.first() {
-                Some(&c) => cur = c,
-                None => return NO_EXT,
-            }
+        while let Some(&c) = self.nodes[cur.index()].children.first() {
+            cur = c;
         }
+        cur
     }
 
     /// Detaches `id` (and its subtree) from the tree, updating ancestor totals.

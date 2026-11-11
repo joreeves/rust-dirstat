@@ -213,6 +213,47 @@ fn save(h: &mut Harness<'_, App>, name: &str) {
     h.render().unwrap().save(dir.join(name)).unwrap();
 }
 
+/// An older backup of [`demo_tree`]: some folders are missing (not backed up yet), an old one
+/// that was since deleted is still there, and some files have other sizes.
+fn demo_backup(src: &Tree) -> Tree {
+    let mut d = Demo { tree: Tree::new("E:\\Backup"), rng: Rng(0x2545_F491_4F6C_DD1D), serial: 0 };
+    let not_backed_up = ["Games\\Pixel Racer", "Photos\\2025", "Projects\\rust-app\\target", "Videos\\Drone"];
+    let mut stack = vec![(src.root(), d.tree.root())];
+    while let Some((from, to)) = stack.pop() {
+        for &c in &src.node(from).children {
+            let n = src.node(c);
+            let path = src.path_of(c).unwrap();
+            let rel = path.strip_prefix("D:\\").unwrap();
+            if not_backed_up.iter().any(|p| rel == std::path::Path::new(p)) {
+                continue;
+            }
+            if n.is_dir() {
+                let id = d.dir(to, &n.name);
+                stack.push((c, id));
+                continue;
+            }
+            let size = match crate::model::extension_of(&n.name).as_str() {
+                // Disk images and laptop backups have grown since; phone backups have shrunk.
+                "vhdx" => n.size - 9 * GB,
+                "zip" if rel.starts_with("Backups\\Laptop") => n.size - d.rng.size(&(GB..3 * GB)),
+                "zip" => n.size + d.rng.size(&(GB..2 * GB)),
+                "docx" | "xlsx" if d.rng.next().is_multiple_of(4) => n.size / 2,
+                _ => n.size,
+            };
+            d.file(to, &n.name, size);
+        }
+    }
+    let root = d.tree.root();
+    let old = d.dir(root, "Old Laptop");
+    d.files(old, 9, "archive", "zip", 2 * GB..5 * GB);
+    let docs = d.dir(old, "Documents");
+    d.files(docs, 60, "document", "pdf", 100 * KB..20 * MB);
+    d.tree.finalize();
+    d.tree.info.method = "walk";
+    d.tree.info.elapsed = Duration::from_millis(6400);
+    d.tree
+}
+
 #[test]
 #[ignore]
 fn readme_screenshots() {
@@ -254,4 +295,17 @@ fn readme_screenshots() {
     h.state_mut().elevated = false;
     h.state_mut().selected_drives.extend([PathBuf::from("D:\\"), PathBuf::from("E:\\")]);
     save(&mut h, "welcome.png");
+
+    // The drive compared with its backup, with a folder missing from the backup selected.
+    let mut h = harness();
+    let left = demo_tree();
+    let mut diff = crate::diff::Diff::new(&left, &demo_backup(&left));
+    diff.elapsed = Duration::from_millis(6900);
+    h.state_mut().set_diff(diff, [PathBuf::from("D:\\"), PathBuf::from("E:\\Backup")]);
+    wait(&mut h, "comparison treemap", |app| app.compared.is_some() && app.treemap.is_current());
+    let c = h.state_mut().compared.as_mut().unwrap();
+    let photos = find(&c.diff.tree, &["Photos", "2025"]);
+    let tree = &c.diff.tree;
+    c.view.reveal(tree, photos);
+    save(&mut h, "compare.png");
 }

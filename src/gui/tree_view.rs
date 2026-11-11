@@ -5,7 +5,7 @@ use egui_extras::{Column, TableBuilder};
 
 use super::View;
 use super::actions::{Action, context_menu};
-use crate::model::{NodeId, Tree};
+use crate::model::{Node, NodeId, Tree};
 use crate::util::{format_count, format_size};
 
 /// Bar colors per nesting level, like WinDirStat's subtree percentage column.
@@ -30,7 +30,7 @@ pub fn show(ui: &mut egui::Ui, tree: &Tree, view: &mut View, actions: &mut Vec<A
     if view.rows_dirty {
         view.rebuild_rows(tree);
     }
-    handle_keys(ui, tree, view, actions);
+    handle_keys(ui, tree, view, actions, true);
     let scroll_row = if std::mem::take(&mut view.scroll_to_selected) {
         view.selected.and_then(|s| view.rows.iter().position(|&(id, _)| id == s))
     } else {
@@ -84,16 +84,7 @@ pub fn show(ui: &mut egui::Ui, tree: &Tree, view: &mut View, actions: &mut Vec<A
                     } else {
                         ui.add_space(18.0);
                     }
-                    let icon = if n.is_synthetic() {
-                        "🗄"
-                    } else if n.is_link() {
-                        "🔗"
-                    } else if n.is_dir() {
-                        "📁"
-                    } else {
-                        "📄"
-                    };
-                    let mut text = RichText::new(format!("{icon} {}", n.name));
+                    let mut text = RichText::new(format!("{} {}", icon(n), n.name));
                     if n.is_synthetic() {
                         text = text.italics();
                     }
@@ -129,8 +120,21 @@ pub fn show(ui: &mut egui::Ui, tree: &Tree, view: &mut View, actions: &mut Vec<A
     view.tree_min_width = needed_width;
 }
 
+/// The icon shown before a node's name.
+pub(super) fn icon(n: &Node) -> &'static str {
+    if n.is_synthetic() {
+        "🗄"
+    } else if n.is_link() {
+        "🔗"
+    } else if n.is_dir() {
+        "📁"
+    } else {
+        "📄"
+    }
+}
+
 /// A painted disclosure triangle (the default fonts lack the arrow glyphs).
-fn expander(ui: &mut egui::Ui, open: bool) -> egui::Response {
+pub(super) fn expander(ui: &mut egui::Ui, open: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 16.0), Sense::click());
     let color = if response.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
     let c = rect.center();
@@ -143,7 +147,7 @@ fn expander(ui: &mut egui::Ui, open: bool) -> egui::Response {
     response
 }
 
-fn right(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) {
+pub(super) fn right(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) {
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         ui.label(text);
     });
@@ -169,8 +173,9 @@ fn percent_bar(ui: &mut egui::Ui, tree: &Tree, id: NodeId, depth: u16) {
     );
 }
 
-/// Arrow keys move the selection, Left/Right collapse/expand, Enter opens, Delete deletes.
-fn handle_keys(ui: &egui::Ui, tree: &Tree, view: &View, actions: &mut Vec<Action>) {
+/// Arrow keys move the selection and Left/Right collapse/expand. When `editable`, Enter opens
+/// a file and Delete deletes; otherwise Enter only expands or collapses folders.
+pub(super) fn handle_keys(ui: &egui::Ui, tree: &Tree, view: &View, actions: &mut Vec<Action>, editable: bool) {
     if ui.ctx().egui_wants_keyboard_input() || view.rows.is_empty() {
         return;
     }
@@ -217,10 +222,12 @@ fn handle_keys(ui: &egui::Ui, tree: &Tree, view: &View, actions: &mut Vec<Action
             select(actions, p);
         }
     }
-    if enter {
-        actions.push(if node.is_dir() { Action::Toggle(sel) } else { Action::Open(sel) });
+    if enter && node.is_dir() {
+        actions.push(Action::Toggle(sel));
+    } else if enter && editable {
+        actions.push(Action::Open(sel));
     }
-    if delete && sel != tree.root() {
+    if editable && delete && sel != tree.root() {
         actions.push(Action::AskDelete(sel));
     }
 }

@@ -6,10 +6,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
-use dirstat::cli::{ReportOptions, print_report};
+use dirstat::cli::{DiffReportOptions, ReportOptions, print_diff_report, print_report};
 use dirstat::scan::{self, Cancelled, Method, Progress};
 use dirstat::util::{format_count, format_size};
-use dirstat::{export, gui, platform, update};
+use dirstat::{diff, export, gui, platform, update};
 
 /// Disk usage analyzer with a cushion treemap (WinDirStat-style). Run without arguments to open
 /// the window.
@@ -28,9 +28,16 @@ enum Command {
         paths: Vec<PathBuf>,
         #[arg(long, value_enum, default_value_t = Method::Auto)]
         method: Method,
+        /// Compare the two PATHS instead of combining them.
+        #[arg(long)]
+        compare: bool,
     },
     /// Scan a drive or folder and print a report (and optionally export CSV/JSON).
     Scan(ScanArgs),
+    /// Compare two drives or folders: scan both and report what is only on one side and what
+    /// differs in size (items are matched by path; file contents aren't compared).
+    #[command(visible_alias = "compare")]
+    Diff(DiffArgs),
     /// Check GitHub for a newer release.
     CheckUpdate,
     /// Download and install the newest release (for copies installed with the installer).
@@ -77,21 +84,56 @@ struct ScanArgs {
     quiet: bool,
 }
 
+#[derive(Args)]
+struct DiffArgs {
+    /// The left drive or folder, e.g. C:\ or D:\Photos.
+    left: PathBuf,
+    /// The right drive or folder, e.g. E:\ or F:\Backup\Photos.
+    right: PathBuf,
+    /// auto = MFT when elevated on NTFS, else walk.
+    #[arg(long, value_enum, default_value_t = Method::Auto)]
+    method: Method,
+    /// Differences listed per folder.
+    #[arg(long, default_value_t = 20)]
+    top: usize,
+    /// Folder levels to list.
+    #[arg(long, default_value_t = 1)]
+    depth: usize,
+    /// Largest file differences listed.
+    #[arg(long, default_value_t = 10)]
+    files: usize,
+    /// Write every difference to a CSV file.
+    #[arg(long, value_name = "FILE")]
+    csv: Option<PathBuf>,
+    /// Do not show live progress on stderr.
+    #[arg(long, short)]
+    quiet: bool,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        None => run_gui(Vec::new(), Method::Auto),
-        Some(Command::Gui { paths, method }) => run_gui(paths, method),
-        Some(Command::Scan(args)) => match run_scan(args) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) if e.is::<Cancelled>() => ExitCode::from(130),
-            Err(e) => {
-                eprintln!("error: {e:#}");
-                ExitCode::FAILURE
-            }
-        },
+        None => run_gui(Vec::new(), false, Method::Auto),
+        Some(Command::Gui { paths, compare: true, .. }) if paths.len() != 2 => {
+            eprintln!("error: --compare needs exactly two paths");
+            ExitCode::from(2)
+        }
+        Some(Command::Gui { paths, method, compare }) => run_gui(paths, compare, method),
+        Some(Command::Scan(args)) => exit_code(run_scan(args)),
+        Some(Command::Diff(args)) => exit_code(run_diff(args)),
         Some(Command::CheckUpdate) => check_update(),
         Some(Command::Update) => install_update(),
+    }
+}
+
+fn exit_code(result: anyhow::Result<()>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) if e.is::<Cancelled>() => ExitCode::from(130),
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -176,9 +218,9 @@ fn install_update() -> ExitCode {
     }
 }
 
-fn run_gui(paths: Vec<PathBuf>, method: Method) -> ExitCode {
+fn run_gui(paths: Vec<PathBuf>, compare: bool, method: Method) -> ExitCode {
     platform::detach_console_if_owned();
-    match gui::run(paths, method) {
+    match gui::run(paths, compare, method) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e:#}");
@@ -251,6 +293,38 @@ fn run_scan(args: ScanArgs) -> anyhow::Result<()> {
         let file = std::io::BufWriter::new(std::fs::File::create(json)?);
         export::write_json(&tree, tree.root(), args.json_depth, file)?;
         writeln!(out, "Wrote {}", json.display())?;
+    }
+    Ok(())
+}
+
+fn run_diff(args: DiffArgs) -> anyhow::Result<()> {
+    let progress = [Arc::new(Progress::new()), Arc::new(Progress::new())];
+    let show_progress = !args.quiet && std::io::stderr().is_terminal();
+    let worker = {
+        let (progress, left, right, method) = (progress.clone(), args.left.clone(), args.right.clone(), args.method);
+        std::thread::spawn(move || diff::compare([&left, &right], method, [&progress[0], &progress[1]]))
+    };
+    while !worker.is_finished() {
+        std::thread::sleep(Duration::from_millis(200));
+        if show_progress {
+            let side = |p: &Progress| {
+                format!("{} files, {}", format_count(p.files.load(Ordering::Relaxed)), format_size(p.bytes.load(Ordering::Relaxed)))
+            };
+            eprint!("\r\x1b[2KLeft: {}   Right: {}", side(&progress[0]), side(&progress[1]));
+        }
+    }
+    if show_progress {
+        eprint!("\r\x1b[2K");
+    }
+    let diff = worker.join().map_err(|_| anyhow::anyhow!("compare thread panicked"))??;
+
+    let mut out = std::io::stdout().lock();
+    let opts = DiffReportOptions { top: args.top, depth: args.depth, files: args.files };
+    print_diff_report(&diff, &opts, &mut out)?;
+    if let Some(csv) = &args.csv {
+        let file = std::io::BufWriter::new(std::fs::File::create(csv)?);
+        export::write_diff_csv(&diff, file)?;
+        writeln!(out, "\nWrote {}", csv.display())?;
     }
     Ok(())
 }

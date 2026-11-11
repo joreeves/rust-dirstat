@@ -13,6 +13,7 @@ A WinDirStat-style disk usage analyzer for Windows, written in Rust. It scans dr
 
 - **Fast NTFS scans.** Run as administrator, rust-dirstat reads the drive's Master File Table directly instead of walking folders, so even millions of files take seconds. Without admin rights it uses a parallel folder walk, and the status bar says why.
 - **Several drives at once.** Select drives and scan them together into one combined view.
+- **Compare two drives or folders**, such as a disk and its backup. You see what is only on one side and what differs in size.
 - **Linked views.** Clicking a tile selects it in the tree, and the reverse. Double-click a tile to zoom into it. Click a file type to highlight its tiles.
 - **File actions** (right-click): Open, Reveal in Explorer, Copy path, Rescan folder, Move to Recycle Bin.
 - **Export** to CSV or JSON, from the window or the command line.
@@ -23,6 +24,36 @@ A WinDirStat-style disk usage analyzer for Windows, written in Rust. It scans dr
 | ![Treemap zoomed into Photos with .jpg tiles highlighted and a tooltip](docs/screenshots/file-types.png) | ![Welcome screen with drive list](docs/screenshots/welcome.png) |
 
 *The screenshots show made-up example data.*
+
+## Comparing two drives or folders
+
+Click **↔ Compare…** and choose a left and a right location: a drive, a folder, or one of each. rust-dirstat scans both at the same time, then matches them item by item.
+
+![A drive compared with its backup: differences in the tree, totals per kind, and a treemap of the bytes that differ](docs/screenshots/compare.png)
+
+- **Matching:** items are matched by path, ignoring case as Windows does.
+- **What counts as different:**
+  - Files are compared **by size**, so two files of the same size count as the same. Their contents aren't read.
+  - A file and a folder with the same name count as two different items.
+- **The table** lists only the items that differ, biggest difference first (for a folder, the bytes that differ inside it). Columns:
+  - **Left** and **Right:** the sizes on each side;
+  - **Difference:** right minus left;
+  - **Status:** what changed.
+
+  Tick **Show identical items in the table** to list everything.
+- **The treemap** shows only the differences: a tile's area is the bytes that differ.
+
+  | Color | Meaning |
+  |---|---|
+  | Red | Only in left |
+  | Amber | Larger in left |
+  | Blue | Only in right |
+  | Cyan | Larger in right |
+
+  Click a kind of difference in the side panel to highlight its tiles.
+- **Right-click** an item to reveal it, or copy its path, on either side.
+- **Rescan** compares the same two locations again.
+- **Export** writes one CSV row per difference.
 
 ## Download
 
@@ -62,11 +93,15 @@ From a terminal:
 ```powershell
 rust-dirstat gui D:\Projects             # open the window and scan right away
 rust-dirstat gui C:\ D:\                 # several drives/folders in one view
+rust-dirstat gui --compare D:\ E:\Backup # open the window comparing two locations
 
 rust-dirstat scan D:\Projects            # text report
 rust-dirstat scan C:\ D:\ --top 10       # one report covering both drives
 rust-dirstat scan C:\ --depth 2 --files 20 --extensions 10 --stats
 rust-dirstat scan D:\ --csv d.csv --json d.json --json-depth 3
+
+rust-dirstat diff D:\ E:\Backup          # compare two drives/folders (alias: compare)
+rust-dirstat diff D:\Photos E:\Photos --depth 2 --files 20 --csv differences.csv
 rust-dirstat check-update                # is there a newer release?
 rust-dirstat update                      # install it (copies installed with setup.exe)
 rust-dirstat --version
@@ -163,7 +198,8 @@ To build the installer locally, install [Inno Setup 6](https://jrsoftware.org/is
 | `src/scan/mft/` | Raw MFT reader. `boot`, `fixup`, `runs`, `record` and `chunk` are pure parsers that never panic on bad data. `io` does the aligned volume reads and finds the `$MFT`, even when it's fragmented through `$ATTRIBUTE_LIST`. `index` joins the records into the tree. |
 | `src/treemap/` | Squarified layout and van Wijk cushion shading into an RGBA buffer |
 | `src/gui/` | eframe app; the treemap is rendered on a background thread and uploaded as a texture |
-| `src/export.rs`, `src/cli.rs` | CSV/JSON writers and the text report |
+| `src/diff.rs` | Comparing two scans: matches the trees by path into one tree sized by the bytes that differ, with per-item left/right sizes and status |
+| `src/export.rs`, `src/cli.rs` | CSV/JSON writers and the text reports |
 | `src/update.rs` | Update check against the latest GitHub release; downloads and starts its installer |
 | `installer/rust-dirstat.iss` | Inno Setup script for the installer |
 | `assets/` | App icon: `icon.svg` (with `icon-small.svg` for 16–24 px) is the source; `rust-dirstat.ico` and `icon-256.png` are generated from it by `cargo run --example make_icon` |

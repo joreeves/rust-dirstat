@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use eframe::egui::{self, Button};
 
+use crate::diff::Side;
 use crate::model::{NodeId, Tree};
 use crate::scan::Method;
 
@@ -41,6 +42,18 @@ pub enum Action {
     Delete(NodeId),
     Rescan(NodeId),
     Export(ExportFormat),
+    /// Open the dialog for choosing two locations to compare.
+    OpenCompare,
+    /// Pick the folder for one side in the compare dialog.
+    BrowseCompare(Side),
+    /// Scan two locations and show how they differ.
+    Compare(PathBuf, PathBuf),
+    /// List items that are the same on both sides in the comparison table too.
+    ShowIdentical(bool),
+    /// Reveal an item of a comparison in Explorer, on one side.
+    RevealIn(NodeId, Side),
+    /// Copy the path of an item of a comparison, on one side.
+    CopyPathIn(NodeId, Side),
 }
 
 /// Items of the right-click menu for a node (used by the tree table and the treemap).

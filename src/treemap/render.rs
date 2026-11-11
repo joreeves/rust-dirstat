@@ -2,7 +2,7 @@
 
 use eframe::egui::Color32;
 
-use super::layout::Layout;
+use super::layout::{Layout, LayoutItem};
 use crate::colors::ext_color;
 use crate::model::Tree;
 
@@ -21,10 +21,26 @@ const LIGHT: [f32; 3] = {
 /// How far highlighted files are blended towards white.
 const HIGHLIGHT_MIX: f32 = 110.0 / 255.0;
 
-/// Renders `layout` into a `width` x `height` image (row-major). Pixels not covered by any
-/// tile are left `background`. Files of type `highlight` (an extension index) are drawn
-/// lighter, with a white edge on tiles big enough to show one.
+/// How to draw one tile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Paint {
+    pub color: [u8; 3],
+    /// Drawn lighter, with a white edge on tiles big enough to show one.
+    pub lit: bool,
+}
+
+/// Renders `layout` into a `width` x `height` image (row-major), colored by file type. Pixels
+/// not covered by any tile are left `background`. Files of type `highlight` (an extension
+/// index) are lit.
 pub fn render(layout: &Layout, tree: &Tree, width: usize, height: usize, background: Color32, highlight: Option<u32>) -> Vec<Color32> {
+    render_with(layout, width, height, background, |item| Paint {
+        color: ext_color(item.color_ext),
+        lit: highlight == Some(item.color_ext) && tree.node(item.node).is_file(),
+    })
+}
+
+/// Renders `layout` like [`render`], with `paint` choosing each leaf tile's color.
+pub fn render_with(layout: &Layout, width: usize, height: usize, background: Color32, paint: impl Fn(&LayoutItem) -> Paint) -> Vec<Color32> {
     let mut px = vec![background; width * height];
     let max_x = width as f32;
     let max_y = height as f32;
@@ -35,9 +51,9 @@ pub fn render(layout: &Layout, tree: &Tree, width: usize, height: usize, backgro
         if x0 >= x1 || y0 >= y1 {
             continue;
         }
-        let lit = highlight == Some(item.color_ext) && tree.node(item.node).is_file();
+        let Paint { color, lit } = paint(item);
         let edged = lit && x1 - x0 > 3 && y1 - y0 > 3;
-        let [cr, cg, cb] = ext_color(item.color_ext).map(f32::from);
+        let [cr, cg, cb] = color.map(f32::from);
         let s = item.surface;
         for y in y0..y1 {
             let fy = y as f32 + 0.5;
